@@ -26,12 +26,13 @@ Plans live outside the repo, so a planning turn produces no diff at all. Watchin
 only `git status` made the one phase where a plan review is mandatory the one
 phase the hook was blind to.
 
-Two files per session, deliberately separate:
+Three files per session, deliberately separate:
 
 | File | Holds | Written |
 | --- | --- | --- |
 | `review-loop-$SID` | the git cksum key | only when the hook asks |
 | `review-loop-baseline-$SID` | the plan cut-off, as its mtime | **every turn** |
+| `review-loop-turn-$SID` | the same git cksum key, sampled at the START of the turn | by `UserPromptSubmit`, only when absent; truncated to empty as a poison by a continuation Stop; removed by Stop once read |
 
 Do not re-couple them. Using the state file as the plan baseline deadlocks — see
 the portability note below.
@@ -81,12 +82,110 @@ Space-free pathspecs only.
 
 ## Install
 
+**Register the same script on all THREE events.** `UserPromptSubmit` samples the
+state of the tree at the start of each turn; `Stop` asks only when that state has
+actually moved since; `SessionStart` forgets the session's
+ask history on every source but `compact`, so a restarted session asks once before
+it settles. With only `Stop`
+registered the hook still works, but it nudges about every dirty file in the
+checkout — including work another session is doing right now.
+
 ```json
 // .claude/settings.json
-{ "hooks": { "Stop": [ { "hooks": [
-  { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/review-loop.sh", "timeout": 10 }
-] } ] } }
+{ "hooks": {
+  "SessionStart": [ { "hooks": [
+    { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/review-loop.sh", "timeout": 10 }
+  ] } ],
+  "UserPromptSubmit": [ { "hooks": [
+    { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/review-loop.sh", "timeout": 10 }
+  ] } ],
+  "Stop": [ { "hooks": [
+    { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/review-loop.sh", "timeout": 10 }
+  ] } ]
+} }
 ```
+
+Skipping `SessionStart` costs you one specific thing, and it is a silent one:
+`--resume` reuses the session id and `/tmp` normally survives, so anything you
+hand-edited while claude was closed is already in the tree when the first resumed
+prompt takes its baseline — and it is then never asked about. Measured without it:
+three silent resumed turns on the user's own diff.
+
+Merge into an existing `hooks` block rather than replacing it — other tools
+register `Stop` hooks too, and clobbering a project's commit or push gate would
+be worse than anything this fixes.
+
+**Keep every `REVIEW_LOOP_*` knob identical across all three registrations.** This
+matters more than it looks, and the consequence is not uniform — an earlier
+version of this section said the worst case was noise, and that was wrong once
+`SessionStart` existed.
+
+Measured, three turns each, with another session writing while this one idles:
+
+| mismatch | result |
+| --- | --- |
+| none | turn 1 asks, then silent — working as intended |
+| `REVIEW_LOOP_PATHS` on prompt vs Stop | **asks 3 of 3** — suppression off. Noise. |
+| `REVIEW_LOOP_STATE_DIR` on prompt vs Stop | **asks 3 of 3** — no baseline found, fails open. Noise. |
+| `REVIEW_LOOP_STATE_DIR` on **SessionStart** vs the other two | **SILENT on the user's own diff after `--resume`** |
+| `REVIEW_LOOP_PLANS_DIR` anywhere | no effect — not part of the key |
+
+That fourth row is the dangerous one. `SessionStart` does not compare anything, it
+*deletes* — so pointed at the wrong directory it deletes nothing, and the resume
+hole it exists to close is silently open again. Everything else degrades loudly.
+
+If you use the inline-env style (`REVIEW_LOOP_PATHS="…" "$CLAUDE_PROJECT_DIR/…"`),
+put the prefix on every line or on none. Adding a third registration and
+forgetting the prefix is the easiest way to hit that row.
+
+Same reason all three get the same timeout: it is the same work on both sides, so a
+tighter budget on the prompt is backwards.
+
+Only `SessionStart`, `UserPromptSubmit` and `Stop` are handled. Any other event
+exits without doing anything, so registering it on `SubagentStop` gets you no
+nudge rather than a surprise.
+
+A `Stop`-only install **fails open by design**: no baseline means no turn
+comparison, and the hook behaves exactly as it did before attribution existed.
+The cost of leaving it that way is noise, and the symptom is easy to miss, so
+register all three.
+
+### What it still will not see
+
+The window is `[prompt, Stop]`, and **that is a trade, not an oversight.** To
+suppress another session's writes that land between your turns, it has to suppress
+everything that lands between your turns — including some of your own:
+
+- a background command **the agent itself started** that finishes after the Stop,
+- edits you make in your editor between turns,
+- a `git stash pop` or branch switch before you type the next prompt.
+
+Anything arriving that way joins the baseline. It stays unasked until the tree
+changes again during a turn — at which point the nudge covers the whole diff,
+including it. If nothing in the tree ever moves again, it is never asked about.
+There is no cheap fix: a rule that distinguishes those arrivals from another
+session's would have to know who wrote a file, and nothing in the hook's reach
+does. Use a worktree per session if that matters more than the noise.
+
+Three cases are handled rather than lost: work written after a **blocked** Stop (a
+sibling hook returning a block) is still asked about on the next turn; a session
+that opens on an already-dirty tree always asks before it settles; and a hook
+killed by its own timeout costs one ask, not the baseline. A nested repository
+dirtied **in place** stays invisible, as it was before this feature — git reports
+one directory entry and a directory's mtime does not move for an edit inside it.
+
+### Cost
+
+The enumeration now runs on the prompt as well as the Stop. End to end, whole
+hook, `/usr/bin/time -p`, warm, dirty tree: **0.07-0.08s** here over six runs, and
+**0.07s** on a large monorepo with 13 dirty entries. It moves with machine load —
+a first pass measured 0.06-0.07s and a review under concurrent writes saw
+0.08-0.10s, so treat it as "under a tenth of a second", not a constant. The `git status` inside it is
+0.00-0.01s; the rest is process startup and `jq`.
+
+**Unmeasured:** a network-backed or otherwise slow filesystem. There the prompt
+registration is dead time before the model starts, so if that is your checkout,
+time it before installing rather than trusting these numbers.
 
 ## Tests
 
@@ -94,7 +193,7 @@ Space-free pathspecs only.
 npm install && npm test
 ```
 
-65 tests. Every "→ silent" assertion carries a positive companion in the same
+99 tests. Every "→ silent" assertion carries a positive companion in the same
 fixture: without one, a hook that emits nothing passes half the suite.
 
 ## Portability notes

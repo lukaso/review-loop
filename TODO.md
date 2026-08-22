@@ -3,25 +3,70 @@
 Spun out of the chiefofstaff prototype after two review rounds. Each item is its
 own slice with its own review.
 
-## Shared checkout makes the nudge lie about authorship
+## ~~Shared checkout makes the nudge lie about authorship~~ — DONE 2026-08-22
 
-**Observed live 2026-08-22.** The hook told one session to run `/code-review` on
-17 files a *concurrent* session had edited. It violates the original constraint:
-"there will be untracked code in the repo if multiple sessions are going. So that
-can't confuse it."
+Shipped as a turn comparison. `UserPromptSubmit` samples the hook's own state key
+into `$TURN_FILE`; `Stop` recomputes it and stays quiet when it is unchanged.
+Fails open with no baseline, so a checkout registered on `Stop` alone behaves
+byte-for-byte as before.
 
-- **Attribution.** Intersect the dirty set with files *this* session wrote, read
-  from `transcript_path`. Cost is fine: `jq -rs` on a ~130MB JSONL measures
-  **~1.3s** (an earlier 0.24s figure was optimistic and did not reproduce). Still
-  affordable inside a 10s timeout; it was `grep -F` at **82s** that was
-  catastrophic, not transcript reading. Must also collect Bash `.input.command` strings: agents write files
-  via heredoc, so a `Write`/`Edit`-only scan under-detects badly. `PostToolUse`
-  capture is the more robust alternative — exact, O(1) at Stop, no transcript
-  schema coupling.
-- **Wording.** "Just written code?" asserts something about *you* that is false
-  in a shared checkout. A nudge that is wrong about what you did erodes
-  compliance faster than one that is merely frequent. Length-neutral fix:
-  "Unreviewed changes in the tree?"
+**Not a timestamp test, and that distinction is the whole slice.** The first cut
+filtered dirty paths by mtime and was silently wrong on `git mv`, `chmod +x`, a
+new symlink to an old target, and a nested repo dirtied in place — git's notion
+of "changed" is not mtime, so mtime cannot decide what git saw. Comparing the
+same key the hook already trusts decides it exactly, and costs one extra
+`git status` per prompt (measured **0.00-0.01s** in a monorepo with 13 dirty entries; the whole hook, end to end, is under a tenth of a second — see README for the range and why it is a range).
+
+**The approach this file used to propose was measured and refuted. Do not
+re-propose it.** Intersecting the dirty set with files this session wrote, read
+from `transcript_path`, was tested against the real incident (17 dirty files, all
+another session's):
+
+| signal | dirty files attributed | verdict |
+| --- | --- | --- |
+| `Write`/`Edit`/`NotebookEdit` `file_path` | 3 / 17 | refuted |
+| `file-history-snapshot.trackedFileBackups` | 3 / 17 | refuted, same set |
+| \+ regex-extracted `Bash` write targets | 7 / 17, plus 490 junk "paths" | refuted |
+| turn comparison (shipped) | 11 of 17 predate the prompt and go unseen | adopted |
+
+The mechanism: that session ran **`Bash` roughly 10x more often than
+`Write`+`Edit`** — 2460 against 231 when sampled on 2026-08-22. Treat the ratio
+as the finding, not the counts: the session was still live, and re-running the
+same count later gives 2572 Bash against the same 231, because only the Bash side
+keeps growing. Files land via heredoc, `sed -i` and scripts, and shell is not
+parseable by regex.
+
+Cost was never the blocker either way. Measured here: extracting Write/Edit paths
+with `jq` is **0.24s** over a 32MB transcript, and a tool-name scan of a 126MB one
+is **0.83s**.
+
+**These are not the same measurement an earlier note retracted.** That note said
+"~1.3s (an earlier 0.24s figure was optimistic and did not reproduce)" — different
+file, different query. Both numbers above were taken in one sitting and are
+reproducible; neither reinstates the retracted one. Transcript reading is
+affordable. It just does not answer the question.
+
+And the subset argument, which does not depend on that ratio: a file written by
+`Write`/`Edit` **during this turn is already inside the window**, so path capture
+adds nothing the window does not already have.
+
+Two measured facts that killed the other candidates:
+- **Transcript birth time is not session start.** Sessions are resumed: one was
+  born 08-20 and still being appended 08-22, another born 08-14. Excluding files
+  older than session start would have excluded 4 of 17.
+- The comparison cannot exclude a concurrent write that lands *inside* our own
+  turn. That session was **active 72% of 49.9h wall-clock**, and 6 of the 17
+  files moved inside its turns, so it would still be asked on those turns. This
+  narrows the lie; it does not end it. A worktree per session is the real fix.
+
+**Wording** — done in the same slice: "Just written code or a plan?" asserted
+something about *you* that is false in a shared checkout. Now "Unreviewed changes
+in the tree?", same line count.
+
+**Still open, deliberately deferred:** plan-file attribution. `~/.claude/plans` is
+shared across sessions too, so the plan trigger has the same bug. It is untouched
+here because the plan path has a documented deadlock history and deserves its own
+slice.
 
 ## The message must not name gstack skills
 

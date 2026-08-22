@@ -36,6 +36,13 @@ reasoning behind everything deferred.
   change. Treat "no findings" as a reason to look harder.
 - **If a review produced fixes, review again.** A fix is code nobody has
   reviewed. Loop until a round comes back clean; four rounds is normal here.
+- **The re-review trigger is CHANGED CODE, not a non-empty findings list.** A
+  round that only corrected comments, README prose or a stale number does not earn
+  another round — nothing executable moved. Triage findings by severity and act on
+  correctness; prose is discretionary and can be batched or skipped. Ignoring this
+  is how the attribution slice reached SEVEN rounds against a predicted four: every
+  prose-only round triggered a full re-review, which found more prose. The genuine
+  defects had all surfaced by round 7.
 - **A plan whose body changed after its review is an unreviewed plan.**
 
 ### Committing
@@ -108,18 +115,86 @@ detail. Do not inline rules into it.
 
 ## State as of 2026-08-22
 
-- Committed at `dc3f599` on `main`. **No remote, nothing pushed.**
-- **65 tests green.** 19 distinct guards mutation-tested here, all killed; the
+- Committed at `dc3f599` on `main`, plus the turn-window attribution slice in the
+  working tree. **No remote, nothing pushed.**
+- **99 tests green**, and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
+  turn comparison, its plan condition, the dispatch and the baseline lifecycle.
+  One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
+  cannot change the outcome, but the state it guards resolves to silence); two
+  others found in round 7 were resolved rather than kept — the `$TURN_FILE` half
+  of the SessionStart reset was DELETED as unable to fail, and the state-dir
+  agreement of that reset got the test it was missing. The
   review agent's own harness reported 25 across four rounds, also all killed —
   that second number is its measurement, not one reproduced in this repo.
-- Not installed anywhere yet. `chiefofstaff` still runs its own older copy.
+- **Installed on itself** as of 2026-08-22: `.claude/settings.json` registers all
+  three events against `$CLAUDE_PROJECT_DIR/hooks/review-loop.sh` — its own source,
+  no vendored copy, so there is nothing to drift. It had NOT been dogfooded here
+  through the entire attribution slice; the tool that nudges about unreviewed work
+  was the one checkout it did not watch.
+- `chiefofstaff` carries a **vendored** copy at `.claude/hooks/review-loop.sh`
+  with a provenance header and a body SHA — edits belong here, not there. It is
+  registered on `Stop` only, so it fails open past the turn-window filter until
+  its `UserPromptSubmit` registration lands.
 - `vitest.config.ts` deliberately has **no `globalSetup`** — the parent repo's
   shared mock-server port was pure contention and cost two aborted runs.
 
-**Next up, in `TODO.md` order:** shared-checkout attribution (the hook currently
-tells you to review a *concurrent session's* diff — observed live during
-development, once on a 17-file diff belonging entirely to another session);
-the message's false authorship claim; GitHub repo + MIT `LICENSE` (`package.json`
+**Done since:** shared-checkout attribution and the message's false authorship
+claim. The hook now has **three registrations, one script** — `UserPromptSubmit`
+samples the state key into `$TURN_FILE`, `Stop` compares against it and removes
+it, `SessionStart` forgets `$STATE_FILE` so a restarted session asks once. That is
+a THIRD state file with a THIRD job; the no-coupling warning above covers all
+three, and `SessionStart` touches exactly one of them on purpose.
+
+**Seven ways this went SILENT, across seven review rounds.** Silence on unreviewed
+work is the only failure this hook cannot have, and every single round found one — the
+last two in the *fixes for* the round before:
+1. mtime filtering missed `git mv`, `chmod`, new symlinks and nested repos.
+2. suppressing on "unchanged since the prompt" alone silenced a session that
+   opened on an already-dirty tree (`/clear`, restart, `/tmp` cleared).
+3. the re-entry guard exited without poisoning the baseline, so work written
+   after a BLOCKED Stop was never asked about again.
+4. consuming the baseline before the slow enumeration meant a timeout took the
+   ask AND the baseline; and separately a racing prompt could clobber the
+   blocked-turn poison. Both ended in permanent silence.
+5. `--no-optional-locks`, added to stop index-lock contention, is a TOP-LEVEL git
+   option: git < 2.15 rejects the whole invocation, `2>/dev/null` hides it, and
+   the tree reads as clean forever. Introduced by a fix, caught by the next round.
+6. adding `ln`/`rm` to the preflight list — to make a test honest — gated the
+   WHOLE hook on them, so a missing `ln` silenced Stop too. Unlisted, both
+   degrade safely on their own. **The preflight list is a kill switch: only put a
+   binary in it whose absence would otherwise leak stderr.**
+7. `--resume` reuses the session id and `/tmp` survives, so `$STATE_FILE` was
+   still there and everything hand-edited while claude was closed got baselined
+   away. `/clear` was covered (new id, no state file); resume was not. Fixed with
+   a THIRD registration on `SessionStart`, which forgets the session's state on
+   every source except `compact`.
+
+**The asymmetry that should decide every one of these calls:** a wrong ASK costs
+one line of output; a wrong SILENCE loses the work. When a branch is uncertain —
+an unknown `SessionStart` source, a missing binary, a rejected git flag, a killed
+process — it must land on the noisy side. Six of the seven above are the same
+mistake: a change that looked safe because it was *quieter*.
+Each was found by constructing the failing case, not by reading the code. If you
+touch the gate, construct one before you believe it is fine.
+
+**The trap that cost this slice a full rewrite: mtime is not git's notion of
+"changed".** The first implementation kept dirty paths whose mtime was not older
+than a marker. It was silently wrong four ways, all reproduced: `git mv`
+(rename(2) leaves mtime alone), `chmod +x`, a NEW symlink to an OLD target
+(`-e`/`-ot` dereference, `stat` does not), and a nested repo dirtied in place (a
+directory's mtime does not move for an in-place edit inside it). All four passed
+the entire suite, because `fire()` never armed a baseline — **every legacy test
+ran in the fail-open path.** If you add a filter here, re-run the enumeration
+fixtures with it ARMED, or you are testing nothing.
+
+**Every round also found tests that passed for the wrong reason** — six in total.
+The recurring shapes: sampling the baseline on a CLEAN tree (`cksum("")` differs
+from any dirt at all), firing twice off one prompt (the second `fire()` runs in
+the fail-open path), and asserting the ASK direction where only the SILENT
+direction can catch the bug. Exactly one test separates the turn gate from the
+older ask-once guard; if you delete that gate, only that one test fails.
+
+**Next up, in `TODO.md` order:** GitHub repo + MIT `LICENSE` (`package.json`
 already claims MIT with no licence file); versioning with a single source of
 truth; and a `setup` script that **merges** into `.claude/settings.json` rather
 than overwriting — clobbering a project's commit or push gate would be worse than
@@ -130,7 +205,7 @@ anything this tool fixes.
 ## Quick reference
 
 ```bash
-npm test                    # 65 tests, ~15s, no network, no ports
+npm test                    # 99 tests, ~29s, no network, no ports
 bash -n hooks/review-loop.sh && ./hooks/review-loop.sh < payload.json
 ```
 

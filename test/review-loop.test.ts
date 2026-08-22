@@ -22,7 +22,7 @@
  * of this suite.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -153,7 +153,20 @@ beforeEach(() => {
   plansDir = fs.mkdtempSync(path.join(tmp, "plans-"));
   makeRepo();
 });
-afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
+  // Three tests deliberately force the state dir OUTSIDE `tmp` — into /tmp, via
+  // the in-repo containment fallback — so the per-test rmSync above cannot reach
+  // what they leave behind. They leaked one file per run, on PASSING runs, and
+  // their own cleanups sat after the expects with no try/finally so a failing run
+  // leaked too: 381 files had accumulated by the time this was noticed. Sweeping
+  // centrally covers the failure path as well, which is the half that was missing.
+  for (const f of fs.readdirSync("/tmp")) {
+    if (/^review-loop-(baseline-|turn-)?[a-z]+-?\d*$/.test(f) && f.endsWith(String(process.pid))) {
+      fs.rmSync(path.join("/tmp", f), { force: true });
+    }
+  }
+});
 
 describe("asking", () => {
   it("asks when there is uncommitted code", () => {
@@ -399,7 +412,7 @@ describe("state key", () => {
     // the hook bail at the payload read, so every assertion about a later stage
     // passes vacuously — which is how the previous version of this test passed
     // against the very bug it guards.
-    for (const b of ["bash", "cat", "git", "xargs", "cksum", "cut", "tr", "stat", "find"]) {
+    for (const b of ["bash", "cat", "git", "xargs", "cksum", "cut", "tr", "stat", "find", "ln", "rm"]) {
       const real = spawnSync("command", ["-v", b], { shell: true, encoding: "utf8" }).stdout.trim();
       if (real) fs.symlinkSync(real, path.join(shim, b));
     }
@@ -446,7 +459,7 @@ describe("state key", () => {
     // "command not found" to stderr and breaks the turn instead of standing down.
     edit("packages/x/src/committed.ts", "export const a = 2;\n");
     const shim = fs.mkdtempSync(path.join(tmp, "nocut-"));
-    for (const b of ["bash", "cat", "jq", "git", "xargs", "cksum", "tr", "stat", "find"]) {
+    for (const b of ["bash", "cat", "jq", "git", "xargs", "cksum", "tr", "stat", "find", "ln", "rm"]) {
       const real = spawnSync("command", ["-v", b], { shell: true, encoding: "utf8" }).stdout.trim();
       if (real) fs.symlinkSync(real, path.join(shim, b));
     }
@@ -512,11 +525,12 @@ describe("message", () => {
     // Flatten first: the message is hard-wrapped, so asserting on phrases that
     // straddle a line break tests the wrap position rather than the meaning.
     const msg = fire()!.replace(/\s+/g, " ");
-    // Just wrote code OR a plan. The hook only sees dirty paths, so it cannot tell
-    // which — it offers both rather than guessing.
-    expect(msg).toContain("code or a plan");
-    expect(msg).toContain("/code-review");
-    expect(msg).toContain("/plan-eng-review");
+    // Code OR a plan. The hook only sees dirty paths and plan mtimes, so it cannot
+    // tell which — it offers both rather than guessing. It used to say "Just
+    // written code or a plan?", which additionally asserted that YOU wrote it; in
+    // a shared checkout that is false, so the claim is gone and the choice stays.
+    expect(msg).toContain("/code-review on the diff");
+    expect(msg).toContain("/plan-eng-review on the plan");
     // A fix is code nobody has reviewed, so fixes — not findings — are what make
     // another round due. Every round of this change's own review found a bug
     // introduced while fixing the previous round.
@@ -961,7 +975,7 @@ describe("plans — the phase git cannot see", () => {
     // casualty. Simulated with a find that rejects -newermB exactly as findutils
     // 4.10.0 does ("invalid predicate", exit 1).
     const shim = fs.mkdtempSync(path.join(tmp, "gnufind-"));
-    for (const b of ["bash", "cat", "jq", "git", "xargs", "cksum", "cut", "tr", "stat"]) {
+    for (const b of ["bash", "cat", "jq", "git", "xargs", "cksum", "cut", "tr", "stat", "ln", "rm"]) {
       const real = spawnSync("command", ["-v", b], { shell: true, encoding: "utf8" }).stdout.trim();
       if (real) fs.symlinkSync(real, path.join(shim, b));
     }
@@ -1018,7 +1032,7 @@ describe("plans — the phase git cannot see", () => {
     // again until after the review nobody asked for. Drop the condition and this
     // test is the only thing that notices.
     const shim = fs.mkdtempSync(path.join(tmp, "badjq2-"));
-    for (const b of ["bash", "cat", "git", "xargs", "cksum", "cut", "tr", "stat", "find"]) {
+    for (const b of ["bash", "cat", "git", "xargs", "cksum", "cut", "tr", "stat", "find", "ln", "rm"]) {
       const real = spawnSync("command", ["-v", b], { shell: true, encoding: "utf8" }).stdout.trim();
       if (real) fs.symlinkSync(real, path.join(shim, b));
     }
@@ -1222,5 +1236,725 @@ describe("plans — the phase git cannot see", () => {
     const msg = fire();
     expect(msg, "both changed").not.toBeNull();
     expect(msg!.match(/Wait for inflight/g) ?? [], "exactly one message").toHaveLength(1);
+  });
+});
+
+/**
+ * ATTRIBUTION — what changed during THIS turn.
+ *
+ * A shared checkout means `git status` shows other sessions' work. The hook used
+ * to nudge about all of it: measured live, it told a READING session to review 17
+ * files another session had written.
+ *
+ * Path-based attribution was measured and refuted before this was built. Against
+ * that same incident, Write/Edit file_paths from the transcript explained 3 of 17
+ * dirty files, and regex-extracted Bash write targets 7 of 17 with heavy junk —
+ * the writer session called Bash ~10x more often than Write+Edit (2460 against 231
+ * when sampled; the session was live, so treat the ratio as the finding, not the
+ * counts). Under-attribution
+ * is the fatal direction: a nudge that goes quiet stops covering real work.
+ *
+ * The FIRST attempt at this filtered dirty paths by mtime against a marker file,
+ * and was wrong in four silent ways — `git mv`, `chmod +x`, a new symlink to an
+ * old target, and a nested repo dirtied in place. git's notion of "changed" is
+ * not mtime, so mtime cannot decide what git saw. Each has a test below.
+ *
+ *   UserPromptSubmit ──> cksum of the dirty set ──> $TURN_FILE  (turn baseline)
+ *                                                        │
+ *   Stop ──> the same cksum now ──> differs from it? ──> ask
+ *
+ * THREE FILES, THREE JOBS. $TURN_FILE is written by UserPromptSubmit ONLY WHEN
+ * ABSENT and removed by Stop as soon as it is read — that pair is what stops a
+ * second prompt (typed ahead, or after an interrupt) from re-baselining over work
+ * already in flight.
+ */
+const turnPath = (session = "sess-1") =>
+  path.join(stateDir, `review-loop-turn-${session}`);
+const turnKey = (session = "sess-1") => fs.readFileSync(turnPath(session), "utf8");
+
+/** Fire the hook as a UserPromptSubmit. Asserts the whole contract: exit 0, no
+ *  stdout, no stderr. A marker hook that prints anything corrupts the prompt. */
+function submitPrompt(
+  opts: { cwd?: string; session?: string; event?: string; source?: string; env?: Record<string, string> } = {},
+): void {
+  const res = spawnSync("bash", [HOOK], {
+    input: JSON.stringify({
+      session_id: opts.session ?? "sess-1",
+      cwd: opts.cwd ?? repo,
+      hook_event_name: opts.event ?? "UserPromptSubmit",
+      ...(opts.source ? { source: opts.source } : {}),
+    }),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      REVIEW_LOOP_STATE_DIR: stateDir,
+      REVIEW_LOOP_PLANS_DIR: plansDir,
+      ...(opts.env ?? {}),
+    },
+  });
+  expect(res.status, `must exit 0; stderr: ${res.stderr}`).toBe(0);
+  expect(res.stderr, `must stay silent on stderr; got: ${res.stderr}`).toBe("");
+  expect(res.stdout.trim(), "the marker branch must emit nothing").toBe("");
+}
+
+describe("attribution — what changed during this turn", () => {
+  it("fails open when there is no baseline at all", () => {
+    // The whole pre-attribution suite runs in this mode. Stated as its own
+    // assertion so a regression fails by name instead of scattering across 65.
+    edit("packages/x/src/committed.ts", "export const a = 2;\n", BASE);
+    expect(fs.existsSync(turnPath()), "no baseline written").toBe(false);
+    expect(fire(), "unfiltered, exactly as before").not.toBeNull();
+  });
+
+  it("ignores dirt that was already there — and asks about work done since", () => {
+    // Each fire() CONSUMES the baseline, so every turn under test re-arms with its
+    // own submitPrompt(). Firing twice off one prompt would put the second call in
+    // the fail-open path, where it passes whether or not attribution works at all.
+    edit("packages/x/src/committed.ts", "export const a = 2;\n", BASE);
+    // The FIRST ask of a session is never suppressed — see the /clear test below.
+    // Only after it has asked once does pre-existing dirt become old news.
+    submitPrompt();
+    expect(fire(), "first ask of the session is never suppressed").not.toBeNull();
+    submitPrompt();
+    expect(fire(), "another session's file, present before our prompt").toBeNull();
+    // POSITIVE COMPANION, same fixture: a hook that emits nothing at all would
+    // pass the assertion above.
+    submitPrompt();
+    edit("packages/x/src/ours.ts", "export const b = 1;\n", BASE + 200);
+    expect(fire(), "written during our turn").not.toBeNull();
+  });
+
+  it("asks when a NEW session opens on an already-dirty tree", () => {
+    // The regression that nearly shipped. Suppressing on "unchanged since the
+    // prompt" ALONE means a session that opens on unreviewed work baselines it and
+    // never asks: /clear mid-work, restarting claude on a dirty checkout, --resume
+    // after a reboot cleared /tmp. Measured before the fix: three consecutive
+    // silent turns on the user's own unreviewed diff, where a Stop-only install
+    // asks. The session boundary is a new session id and no state file.
+    edit("packages/x/src/unreviewed.ts", "export const a = 1;\n", BASE);
+    submitPrompt({ session: "after-clear" });
+    expect(
+      fire({ session: "after-clear" }),
+      "never asked in THIS session, so the dirt is not old news",
+    ).not.toBeNull();
+    // POSITIVE COMPANION: and once it HAS asked, it settles down.
+    submitPrompt({ session: "after-clear" });
+    expect(fire({ session: "after-clear" }), "now it is old news").toBeNull();
+  });
+
+  it("never silences work written after a BLOCKED Stop", () => {
+    // A sibling Stop hook blocks, the model keeps working, and the continuation
+    // Stop arrives with stop_hook_active=true. That work belongs to this turn but
+    // lands after the Stop that already consumed the baseline — so without the
+    // poison the next prompt samples a tree that already contains it and every
+    // later Stop compares equal. Measured before the fix: the second file was
+    // never asked about while `git status` still showed it.
+    submitPrompt();
+    edit("packages/x/src/first.ts", "export const a = 1;\n", BASE);
+    expect(fire(), "asks about the first file").not.toBeNull();
+
+    // The block: model keeps going, writes more, continuation Stop is a no-op ask.
+    edit("packages/x/src/second.ts", "export const b = 1;\n", BASE + 10);
+    expect(fire({ stopActive: true }), "a continuation Stop never asks").toBeNull();
+
+    submitPrompt();
+    expect(
+      fire(),
+      "the file written during the block is unreviewed and must still be asked about",
+    ).not.toBeNull();
+    // POSITIVE COMPANION: and it settles down straight after, rather than nagging.
+    submitPrompt();
+    expect(fire(), "once asked, quiet again").toBeNull();
+  });
+
+  it("asks again after --resume, when the id and the state file both survive", () => {
+    // The /clear case below is a DIFFERENT shape and does not cover this one:
+    // /clear mints a new session id, so there is no state file and round 2's guard
+    // fires on its own. `--resume` reuses the id and /tmp normally survives, so the
+    // state file is still there — and everything hand-edited while claude was
+    // closed is already in the tree when the first resumed prompt baselines it.
+    // Measured before SessionStart was wired: three silent resumed turns on the
+    // user's own diff.
+    submitPrompt();
+    edit("packages/x/src/agent.ts", "export const a = 1;\n", BASE);
+    expect(fire(), "the agent's own edit, asked about").not.toBeNull();
+
+    // claude is closed. The user edits by hand — no prompt, no Stop.
+    edit("packages/x/src/handwritten.ts", "export const b = 1;\n", BASE + 50);
+
+    submitPrompt({ event: "SessionStart", source: "resume" });
+    submitPrompt();
+    expect(fire(), "a restarted session must ask before it settles").not.toBeNull();
+    // POSITIVE COMPANION: it settles immediately after, rather than nagging.
+    submitPrompt();
+    expect(fire(), "and then it is quiet").toBeNull();
+  });
+
+  it("resets on a source it has never heard of, rather than staying quiet", () => {
+    // The asymmetry: resetting wrongly costs one ask, failing to reset loses the
+    // work for good. So an unknown source — a new Claude Code value, or a payload
+    // missing the field — must land on the noisy side of that trade.
+    submitPrompt();
+    edit("packages/x/src/ours.ts", "export const a = 1;\n", BASE);
+    expect(fire(), "asked once").not.toBeNull();
+    edit("packages/x/src/handwritten.ts", "export const b = 1;\n", BASE + 50);
+    submitPrompt({ event: "SessionStart", source: "teleported" });
+    submitPrompt();
+    expect(fire(), "unknown source is treated as a restart").not.toBeNull();
+  });
+
+  it("does not reset on compaction, which is not a break in the work", () => {
+    submitPrompt();
+    edit("packages/x/src/ours.ts", "export const a = 1;\n", BASE);
+    expect(fire(), "asked once").not.toBeNull();
+    edit("packages/x/src/theirs.ts", "export const b = 1;\n", BASE + 50);
+    submitPrompt({ event: "SessionStart", source: "compact" });
+    submitPrompt();
+    expect(fire(), "compaction is mid-session; the gate still applies").toBeNull();
+  });
+
+  it("fails open on a second Stop with no prompt between them", () => {
+    // Stop closes the turn and consumes the baseline, so a further Stop has none.
+    // Pinned deliberately: the fallback is to ask, never to go quiet.
+    edit("packages/x/src/theirs.ts", "export const a = 2;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask of the session").not.toBeNull();
+    submitPrompt();
+    expect(fire(), "baseline armed, nothing of ours changed").toBeNull();
+    expect(fs.existsSync(turnPath()), "consumed").toBe(false);
+    edit("packages/x/src/theirs.ts", "export const a = 3;\n", BASE + 5);
+    expect(fire(), "no baseline left — ask rather than risk silence").not.toBeNull();
+  });
+
+  it("suppresses a CONCURRENT session's write that landed before our prompt", () => {
+    // THE test for this feature, and the only shape that separates the turn gate
+    // from the pre-existing "ask once per distinct state" guard. Every other
+    // silent case is already suppressed by that guard, so it passes with the turn
+    // gate deleted — verified. Here the key HAS moved since our last ask, so the
+    // ask-once guard does not fire; only "it did not move during our turn" can.
+    edit("packages/x/src/ours.ts", "export const a = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "our work, asked about").not.toBeNull();
+
+    // Another session in the same checkout writes while we sit idle.
+    edit("packages/x/src/theirs.ts", "export const b = 1;\n", BASE + 50);
+    submitPrompt();
+    expect(fire(), "not ours, and it predates our prompt").toBeNull();
+
+    // POSITIVE COMPANION: our own next edit still re-arms.
+    submitPrompt();
+    edit("packages/x/src/ours.ts", "export const a = 2;\n", BASE + 100);
+    expect(fire(), "ours, during our turn").not.toBeNull();
+  });
+
+  it("stays SILENT on an idle turn after a productive one", () => {
+    submitPrompt();
+    edit("packages/x/src/ours.ts", "export const b = 1;\n", BASE + 200);
+    expect(fire(), "we wrote something").not.toBeNull();
+
+    submitPrompt();
+    expect(fire(), "idle turn — nothing of ours moved").toBeNull();
+    submitPrompt();
+    expect(fire(), "still idle, still baselined").toBeNull();
+
+    submitPrompt();
+    edit("packages/x/src/ours.ts", "export const b = 2;\n", BASE + 400);
+    expect(fire(), "and it re-arms on the next real edit").not.toBeNull();
+  });
+
+  // ── The four classes an mtime filter got silently wrong ────────────────────
+  // Every one of these is a change git reports while the file's mtime stays put.
+
+  it("asks about a `git mv` — rename(2) does not move mtime", () => {
+    edit("packages/x/src/movable.ts", "export const c = 1;\n", BASE);
+    commitAll();
+    // ARMED. Firing only the session's FIRST Stop makes this vacuous: $STATE_FILE
+    // does not exist yet, so the turn gate is off and the ask-once guard compares a
+    // non-empty cksum against "" — which always differs, so the hook asks whatever
+    // the key contains. Verified: a mutant whose key is the constant cksum("")
+    // survived all four of these while 24 other tests killed it. Ask once first so
+    // $STATE_FILE exists, and sample the baseline on an ALREADY-dirty tree.
+    edit("packages/x/src/decoy.ts", "export const d = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask, on the decoy").not.toBeNull();
+    submitPrompt();
+    git("mv", "packages/x/src/movable.ts", "packages/x/src/moved.ts");
+    expect(git("status", "--porcelain").stdout, "fixture must really be a rename")
+      .toMatch(/^R/m);
+    expect(fire(), "a rename is unreviewed work").not.toBeNull();
+  });
+
+  it("asks about a mode change — chmod does not move mtime either", () => {
+    edit("packages/x/src/tool.sh", "#!/bin/sh\n", BASE);
+    commitAll();
+    // ARMED. Firing only the session's FIRST Stop makes this vacuous: $STATE_FILE
+    // does not exist yet, so the turn gate is off and the ask-once guard compares a
+    // non-empty cksum against "" — which always differs, so the hook asks whatever
+    // the key contains. Verified: a mutant whose key is the constant cksum("")
+    // survived all four of these while 24 other tests killed it. Ask once first so
+    // $STATE_FILE exists, and sample the baseline on an ALREADY-dirty tree.
+    edit("packages/x/src/decoy.ts", "export const d = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask, on the decoy").not.toBeNull();
+    submitPrompt();
+    fs.chmodSync(path.join(repo, "packages/x/src/tool.sh"), 0o755);
+    setMtime(path.join(repo, "packages/x/src/tool.sh"), BASE); // mtime pinned back
+    expect(git("status", "--porcelain").stdout, "fixture must show a modification")
+      .toMatch(/M/);
+    expect(fire(), "a mode change is a change").not.toBeNull();
+  });
+
+  it("asks about a NEW symlink pointing at an OLD target", () => {
+    // `-e` and `-ot` dereference; `stat` does not. An mtime test therefore read
+    // the TARGET's timestamp and dropped the link.
+    edit("packages/x/src/ancient.ts", "export const d = 1;\n", BASE);
+    commitAll();
+    // ARMED. Firing only the session's FIRST Stop makes this vacuous: $STATE_FILE
+    // does not exist yet, so the turn gate is off and the ask-once guard compares a
+    // non-empty cksum against "" — which always differs, so the hook asks whatever
+    // the key contains. Verified: a mutant whose key is the constant cksum("")
+    // survived all four of these while 24 other tests killed it. Ask once first so
+    // $STATE_FILE exists, and sample the baseline on an ALREADY-dirty tree.
+    edit("packages/x/src/decoy.ts", "export const d = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask, on the decoy").not.toBeNull();
+    submitPrompt();
+    fs.symlinkSync("ancient.ts", path.join(repo, "packages/x/src/fresh-link.ts"));
+    expect(fire(), "a new symlink is new work").not.toBeNull();
+  });
+
+  it("asks when a nested repo first appears", () => {
+    // git emits ONE directory entry and will not recurse. The entry appearing is
+    // what must arm the question; an mtime test on the directory dropped it.
+    // ARMED. Firing only the session's FIRST Stop makes this vacuous: $STATE_FILE
+    // does not exist yet, so the turn gate is off and the ask-once guard compares a
+    // non-empty cksum against "" — which always differs, so the hook asks whatever
+    // the key contains. Verified: a mutant whose key is the constant cksum("")
+    // survived all four of these while 24 other tests killed it. Ask once first so
+    // $STATE_FILE exists, and sample the baseline on an ALREADY-dirty tree.
+    edit("packages/x/src/decoy.ts", "export const d = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask, on the decoy").not.toBeNull();
+    submitPrompt();
+    const sub = path.join(repo, "packages/x/sub");
+    fs.mkdirSync(sub, { recursive: true });
+    spawnSync("git", ["init", "-q", "."], { cwd: sub, encoding: "utf8" });
+    fs.writeFileSync(path.join(sub, "inner.ts"), "export const e = 1;\n");
+    setMtime(sub, BASE);
+    expect(fire(), "a nested repo appeared this turn").not.toBeNull();
+  });
+
+  it("still asks for a plan when the git side is unchanged", () => {
+    // The plan path is deliberately untouched by attribution: plans live outside
+    // the repo and the turn comparison must not reach them.
+    edit("packages/x/src/theirs.ts", "export const a = 2;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask of the session").not.toBeNull();
+    submitPrompt();
+    expect(fire(), "arms the baseline, git side identical").toBeNull();
+    stampState("sess-1", BASE + 300);
+    // RE-ARM. Without this the next fire() runs in the fail-open path, where it
+    // asks regardless — and the assertion below would pass against a turn guard
+    // that ignores plans entirely. Verified: that mutant survived until this line.
+    submitPrompt();
+    plan("p.md", "# plan\n", BASE + 400);
+    expect(fire(), "a plan changed, even though the git side did not").not.toBeNull();
+  });
+});
+
+/** A `git` that stalls on `status`, so a kill or a race has a real window to land
+ *  in. Everything else passes straight through to the real binary. */
+function slowGitShim(seconds = 2): string {
+  const shim = fs.mkdtempSync(path.join(tmp, "slowgit-"));
+  const real = spawnSync("command", ["-v", "git"], { shell: true, encoding: "utf8" }).stdout.trim();
+  fs.writeFileSync(
+    path.join(shim, "git"),
+    `#!/bin/sh\nfor a in "$@"; do [ "$a" = "status" ] && sleep ${seconds}; done\nexec ${real} "$@"\n`,
+  );
+  fs.chmodSync(path.join(shim, "git"), 0o755);
+  return shim;
+}
+
+describe("attribution — losing a turn without losing the work", () => {
+  it("a hook killed before it can ask leaves the baseline intact", () => {
+    // The hook runs under a timeout. If the baseline were consumed BEFORE the slow
+    // enumeration, a SIGTERM in that window would take the ask AND the baseline:
+    // $STATE_FILE still holds the old key, so the next prompt would sample the
+    // un-asked work as its own baseline and the gate would be quiet on it for
+    // good. Consumed at the terminal points instead, a kill costs one ask.
+    submitPrompt();
+    edit("packages/x/src/asked.ts", "export const a = 1;\n", BASE);
+    expect(fire(), "turn 1 asks, so $STATE_FILE exists").not.toBeNull();
+
+    submitPrompt();
+    edit("packages/x/src/unasked.ts", "export const b = 1;\n", BASE + 10);
+    const killed = spawnSync("bash", [HOOK], {
+      input: JSON.stringify({ session_id: "sess-1", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      timeout: 400, // dies inside the stalled `git status`
+      env: { ...process.env, PATH: `${slowGitShim()}:${process.env.PATH}`, REVIEW_LOOP_STATE_DIR: stateDir, REVIEW_LOOP_PLANS_DIR: plansDir },
+    });
+    expect(killed.stdout ?? "", "it never got as far as asking").toBe("");
+
+    submitPrompt(); // must NOT re-baseline over the un-asked work
+    expect(fire(), "the killed turn's work is still unreviewed").not.toBeNull();
+  });
+
+  it("a poison written mid-prompt is not clobbered by the prompt's own write", async () => {
+    // `[ ! -f ]` and the write are separated by the enumeration, so a continuation
+    // Stop can poison the file inside that gap. With a clobbering write the prompt
+    // would overwrite the poison with a key that already contains the blocked
+    // turn's work — round 3's defect, restored by a race. A create-if-absent `ln`
+    // loses that write instead, which is the direction that keeps the work.
+    const child = spawn("bash", [HOOK], {
+      env: { ...process.env, PATH: `${slowGitShim()}:${process.env.PATH}`, REVIEW_LOOP_STATE_DIR: stateDir, REVIEW_LOOP_PLANS_DIR: plansDir },
+    });
+    child.stdin.end(JSON.stringify({ session_id: "sess-1", cwd: repo, hook_event_name: "UserPromptSubmit" }));
+    await new Promise((r) => setTimeout(r, 500)); // inside collect_state
+    fs.writeFileSync(turnPath(), ""); // the continuation Stop poisons
+    await new Promise((r) => child.on("exit", r));
+    expect(fs.readFileSync(turnPath(), "utf8"), "the poison must survive").toBe("");
+  });
+
+  it("still asks when `ln` is missing, rather than disabling itself", () => {
+    // `ln` writes the baseline and `rm` consumes the turn, so both are dependencies
+    // — but adding them to the hook's preflight list gates the WHOLE hook on them,
+    // Stop included, and a missing one then exits 0 before doing anything. Measured
+    // when they were briefly listed: a dirty tree went completely silent. Unlisted,
+    // the baseline write just fails, and the Stop side fails open and asks.
+    const shim = fs.mkdtempSync(path.join(tmp, "noln-"));
+    for (const b of ["bash", "cat", "jq", "git", "xargs", "cksum", "cut", "tr", "find", "stat", "rm", "sh"]) {
+      const real = spawnSync("command", ["-v", b], { shell: true, encoding: "utf8" }).stdout.trim();
+      if (real) fs.symlinkSync(real, path.join(shim, b));
+    }
+    expect(fs.existsSync(path.join(shim, "ln")), "ln must be absent").toBe(false);
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    const res = spawnSync(path.join(shim, "bash"), [HOOK], {
+      input: JSON.stringify({ session_id: "noln", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      env: { PATH: shim, REVIEW_LOOP_STATE_DIR: stateDir, REVIEW_LOOP_PLANS_DIR: plansDir },
+    });
+    expect(res.status, "never blocks").toBe(0);
+    expect(res.stderr, "and stays quiet on stderr").toBe("");
+    expect(res.stdout.trim(), "unreviewed work must still be asked about").not.toBe("");
+  });
+
+  it("still works on a git too old for --no-optional-locks", () => {
+    // --no-optional-locks is a TOP-LEVEL git option added in 2.15, so an older git
+    // REJECTS THE WHOLE INVOCATION (exit 129) rather than ignoring it. Every git
+    // call here is 2>/dev/null, so that rejection is invisible: the enumeration
+    // returns nothing, TOTAL is 0, the key is the constant cksum("") and the hook
+    // never asks again, in any session. RHEL 7 still ships git 1.8.3.1.
+    //
+    // This is not hypothetical caution — the flag was added for lock contention
+    // and shipped WITHOUT this probe, and a dirty tree then went silent forever.
+    const shim = fs.mkdtempSync(path.join(tmp, "oldgit-"));
+    const real = spawnSync("command", ["-v", "git"], { shell: true, encoding: "utf8" }).stdout.trim();
+    fs.writeFileSync(
+      path.join(shim, "git"),
+      `#!/bin/sh\nfor a in "$@"; do [ "$a" = "--no-optional-locks" ] && { echo "error: unknown option" >&2; exit 129; }; done\nexec ${real} "$@"\n`,
+    );
+    fs.chmodSync(path.join(shim, "git"), 0o755);
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    const res = spawnSync("bash", [HOOK], {
+      input: JSON.stringify({ session_id: "oldgit", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${shim}:${process.env.PATH}`, REVIEW_LOOP_STATE_DIR: stateDir, REVIEW_LOOP_PLANS_DIR: plansDir },
+    });
+    expect(res.status, "never blocks").toBe(0);
+    expect(res.stderr, "and never leaks the rejection").toBe("");
+    expect(res.stdout.trim(), "must fall back to plain git status and still ask").not.toBe("");
+  });
+
+  it("reads git status without taking the index lock", () => {
+    // This enumeration now runs TWICE per turn, in a checkout the feature exists
+    // BECAUSE it is shared with concurrent sessions. Plain `git status`
+    // opportunistically rewrites .git/index and takes .git/index.lock to do it, so
+    // a collision makes another session's `git add` fail outright.
+    const shim = fs.mkdtempSync(path.join(tmp, "argv-"));
+    const log = path.join(shim, "argv.log");
+    const real = spawnSync("command", ["-v", "git"], { shell: true, encoding: "utf8" }).stdout.trim();
+    fs.writeFileSync(path.join(shim, "git"), `#!/bin/sh\necho "$@" >> ${log}\nexec ${real} "$@"\n`);
+    fs.chmodSync(path.join(shim, "git"), 0o755);
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    const res = spawnSync("bash", [HOOK], {
+      input: JSON.stringify({ session_id: "lock", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${shim}:${process.env.PATH}`, REVIEW_LOOP_STATE_DIR: stateDir, REVIEW_LOOP_PLANS_DIR: plansDir },
+    });
+    expect(res.stdout.trim(), "must still ask").not.toBe("");
+    const argv = fs.readFileSync(log, "utf8");
+    expect(argv, "status must run").toContain("status");
+    for (const line of argv.split("\n").filter((l) => l.includes("status"))) {
+      expect(line, "every status call must waive the optional lock").toContain("--no-optional-locks");
+    }
+  });
+});
+
+describe("attribution — the turn boundary", () => {
+  it("consumes the baseline at Stop, so the next prompt takes a fresh one", () => {
+    submitPrompt();
+    const first = turnKey();
+    expect(fire(), "clean tree, nothing changed this turn").toBeNull();
+    expect(fs.existsSync(turnPath()), "Stop must consume it").toBe(false);
+    // POSITIVE COMPANION: the next turn re-baselines against the NEW reality, so
+    // work done in the previous turn is not re-asked about forever.
+    edit("packages/x/src/a.ts", "export const a = 1;\n", BASE);
+    submitPrompt();
+    expect(turnKey(), "a fresh sample, not the old one").not.toBe(first);
+    expect(fire(), "first ask of the session, on the new dirt").not.toBeNull();
+    submitPrompt();
+    expect(fire(), "and nothing since THAT prompt").toBeNull();
+  });
+
+  it("does NOT re-baseline when a second prompt arrives before any Stop", () => {
+    // Typed ahead, or the user interrupted and retyped — Stop does not fire on an
+    // interrupt. Re-baselining here would swallow work already written this turn.
+    submitPrompt();
+    const original = turnKey();
+    edit("packages/x/src/inflight.ts", "export const a = 1;\n", BASE + 100);
+    submitPrompt();
+    expect(turnKey(), "baseline must not move mid-turn").toBe(original);
+    expect(fire(), "in-flight work must still be asked about").not.toBeNull();
+  });
+});
+
+describe("attribution — the UserPromptSubmit branch", () => {
+  it("writes the baseline and emits nothing", () => {
+    submitPrompt();
+    expect(fs.existsSync(turnPath()), "baseline written").toBe(true);
+    expect(turnKey(), "and it is a key, not an empty marker").toMatch(/^\d+$/);
+  });
+
+  it("sanitises the session id in the baseline path, like every other state file", () => {
+    submitPrompt({ session: "../../evil sess" });
+    // tr -c 'A-Za-z0-9_-' '_' — dots and slashes and spaces all collapse to _.
+    expect(fs.existsSync(path.join(stateDir, "review-loop-turn-______evil_sess")), "sanitised").toBe(true);
+    expect(fs.existsSync(path.join(stateDir, "../../evil sess")), "escaped the state dir").toBe(false);
+  });
+
+  it("is inert on an unrelated hook event", () => {
+    // The fixture MUST be dirty. On a clean tree a fall-through to the Stop path
+    // is silent for the ordinary reason, so the test would pass against a hook
+    // that does not dispatch at all — verified: that exact mutant survived.
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    submitPrompt({ event: "PreToolUse" });
+    expect(fs.existsSync(turnPath()), "no baseline for a foreign event").toBe(false);
+    // POSITIVE COMPANION: proves the branch can fire at all in this fixture.
+    submitPrompt();
+    expect(fs.existsSync(turnPath()), "and the real event still writes one").toBe(true);
+  });
+
+  it("stays silent on stderr when there is no usable stat(1)", () => {
+    // The probe runs BEFORE the dispatch, because both events need it — so its
+    // failure arm would otherwise print to stderr on every prompt, for as long as
+    // the misconfiguration lasts. On UserPromptSubmit stderr reaches the user
+    // mid-sentence, and this branch's whole contract is to say nothing.
+    //
+    // A PATH carrying every preflight binary EXCEPT stat: with one missing the
+    // hook bails at the preflight instead, and the assertion goes vacuous.
+    const shim = fs.mkdtempSync(path.join(tmp, "nostat-"));
+    // `bash` too: spawnSync resolves the interpreter through this PATH, so without
+    // it the spawn fails with ENOENT and the assertions never run. `ln` and `rm`
+    // are here for a DIFFERENT reason: they are deliberately NOT on the hook's
+    // preflight list (listing them would gate the whole hook on them — see "still
+    // asks when `ln` is missing"), so without them in the shim the baseline write
+    // fails for that reason instead and this test passes without isolating `stat`
+    // at all. Do not trim them.
+    for (const bin of ["bash", "cat", "jq", "git", "xargs", "cksum", "cut", "tr", "find", "sh", "ln", "rm"]) {
+      const real = spawnSync("command", ["-v", bin], { shell: true, encoding: "utf8" }).stdout.trim();
+      if (real) fs.symlinkSync(real, path.join(shim, bin));
+    }
+    expect(fs.existsSync(path.join(shim, "stat")), "stat must be absent").toBe(false);
+    expect(fs.existsSync(path.join(shim, "git")), "git must be present").toBe(true);
+    // submitPrompt() asserts exit 0, empty stdout AND empty stderr.
+    submitPrompt({ env: { PATH: shim } });
+    expect(fs.existsSync(turnPath()), "no stat means no baseline, and that is fine").toBe(false);
+
+    // POSITIVE COMPANION: the same misconfiguration on Stop DOES report itself,
+    // because there the diagnostic is worth having and interrupts nobody.
+    const res = spawnSync("bash", [HOOK], {
+      input: JSON.stringify({ session_id: "sess-1", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      env: { ...process.env, PATH: shim, REVIEW_LOOP_STATE_DIR: stateDir, REVIEW_LOOP_PLANS_DIR: plansDir },
+    });
+    expect(res.status, "still never blocks").toBe(0);
+    expect(res.stderr, "Stop says why it disabled itself").toContain("no usable stat");
+  });
+
+  it("resets through the SAME state-dir fallback the other two events use", () => {
+    // All three registrations must land on one state dir or the reset deletes a
+    // file nobody reads. Nothing pinned this: a mutant computing the SessionStart
+    // paths straight from $REVIEW_LOOP_STATE_DIR, skipping the symlink resolution
+    // and the in-repo fallback, survived the whole suite. On macOS the /tmp ->
+    // /private/var resolution alone is enough to make the two paths differ.
+    const inside = path.join(repo, "state");
+    fs.mkdirSync(inside, { recursive: true });
+    const session = `sess-reset-${process.pid}`;
+    const env = { REVIEW_LOOP_STATE_DIR: inside };
+    try {
+      submitPrompt({ session, env });
+      edit("packages/x/src/agent.ts", "export const a = 1;\n", BASE);
+      expect(fire({ session, env }), "the agent's edit").not.toBeNull();
+      edit("packages/x/src/handwritten.ts", "export const b = 1;\n", BASE + 50);
+      submitPrompt({ session, env, event: "SessionStart", source: "resume" });
+      submitPrompt({ session, env });
+      expect(
+        fire({ session, env }),
+        "the reset must have removed the file the Stop branch actually reads",
+      ).not.toBeNull();
+    } finally {
+      for (const f of ["turn-", "", "baseline-"]) {
+        fs.rmSync(path.join("/tmp", `review-loop-${f}${session}`), { force: true });
+      }
+    }
+  });
+
+  it("agrees with the Stop branch on the baseline path when the state dir is inside the repo", () => {
+    // Both branches fall back to /tmp, and they must land on the SAME path. If
+    // they diverge the baseline silently never applies — which looks exactly like
+    // fail-open, so nothing else in this suite would catch it.
+    const inside = path.join(repo, "state");
+    fs.mkdirSync(inside, { recursive: true });
+    const session = `agree-${process.pid}`;
+    const shared = path.join("/tmp", `review-loop-turn-${session}`);
+    fs.rmSync(shared, { force: true });
+    try {
+      edit("packages/x/src/theirs.ts", "export const a = 2;\n", BASE);
+      submitPrompt({ session, env: { REVIEW_LOOP_STATE_DIR: inside } });
+      expect(fs.existsSync(shared), "baseline fell back to /tmp").toBe(true);
+      expect(
+        fire({ session, env: { REVIEW_LOOP_STATE_DIR: inside } }),
+        "first ask of the session",
+      ).not.toBeNull();
+      submitPrompt({ session, env: { REVIEW_LOOP_STATE_DIR: inside } });
+      expect(
+        fire({ session, env: { REVIEW_LOOP_STATE_DIR: inside } }),
+        "Stop read the SAME fallback baseline and compared against it",
+      ).toBeNull();
+      submitPrompt({ session, env: { REVIEW_LOOP_STATE_DIR: inside } });
+      edit("packages/x/src/ours.ts", "export const b = 1;\n", BASE + 200);
+      expect(
+        fire({ session, env: { REVIEW_LOOP_STATE_DIR: inside } }),
+        "and still asks for work done in the turn",
+      ).not.toBeNull();
+    } finally {
+      // "turn-", with the hyphen: it was "turn" for a while, which silently matched
+      // nothing and left one file per run in /tmp (four were found).
+      for (const f of ["turn-", "", "baseline-"]) {
+        fs.rmSync(path.join("/tmp", `review-loop-${f}${session}`), { force: true });
+      }
+    }
+  });
+});
+
+/**
+ * The legacy fixtures, re-run with a baseline ARMED.
+ *
+ * Every one of the 65 tests written before attribution existed runs in the
+ * no-baseline fail-open path, because fire() never calls submitPrompt(). All four
+ * of the mtime bugs above would have stayed green through that whole suite. These
+ * re-drive the load-bearing enumeration cases with the turn comparison live.
+ */
+describe("attribution — the enumeration cases, with a baseline armed", () => {
+  it("attributes a rename against a non-empty baseline", () => {
+    edit("packages/x/src/README.ts", "export const a = 1;\n", BASE);
+    edit("packages/x/src/after.ts", "export const b = 1;\n", BASE);
+    commitAll();
+    // The baseline MUST be sampled on an already-dirty tree. Sampled clean it is
+    // cksum(""), which any dirt at all differs from.
+    //
+    // SCOPE, honestly: this does NOT cover rename CONSUMPTION. Removing the
+    // `[RC]` old-path read leaves this green, because the outcome asserted is
+    // "asks" and a leaked phantom still changes the key. Consumption is owned by
+    // the two `enumeration` tests and by the armed leak test below, which assert
+    // the SILENT direction — that is what a phantom actually breaks.
+    edit("packages/x/src/decoy.ts", "export const d = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask, on the decoy").not.toBeNull();
+    submitPrompt();
+    git("mv", "packages/x/src/README.ts", "packages/x/src/renamed.ts");
+    expect(git("status", "--porcelain").stdout, "fixture must really be a rename")
+      .toMatch(/^R/m);
+    expect(fire(), "the rename, against a non-empty baseline").not.toBeNull();
+  });
+
+  it("does not let a rename's phantom path leak in, with a baseline armed", () => {
+    // The armed twin of the legacy leak test. Without consumption the old path is
+    // parsed as a status line and its phantom — the old path minus three chars —
+    // can name a REAL, EXCLUDED file, whose mtime then drives the key. Asserting
+    // the SILENT direction is what catches it: touching only the excluded file
+    // must not re-arm.
+    const paths = ". :(exclude)TODO.md";
+    fs.mkdirSync(path.join(repo, "xy"), { recursive: true });
+    edit("xy/TODO.md", "old\n", BASE);
+    commitAll();
+    fs.renameSync(path.join(repo, "xy/TODO.md"), path.join(repo, "packages/x/src/renamed.md"));
+    git("add", "-N", "packages/x/src/renamed.md");
+    submitPrompt({ env: { REVIEW_LOOP_PATHS: paths } });
+    expect(fire({ env: { REVIEW_LOOP_PATHS: paths } }), "first ask").not.toBeNull();
+    submitPrompt({ env: { REVIEW_LOOP_PATHS: paths } });
+    edit("TODO.md", "# touched\n", BASE + 500);
+    expect(
+      fire({ env: { REVIEW_LOOP_PATHS: paths } }),
+      "an EXCLUDED file moved; a leaked phantom would re-arm on it",
+    ).toBeNull();
+  });
+
+  it("re-arms on chmod of an ALREADY-dirty file — the key carries mode", () => {
+    // Finding 7 of round 2. When chmod moves a CLEAN file into the dirty set the
+    // path itself is new, so any key notices. The case that needs mode in the key
+    // is a file that was ALREADY dirty: same path, same mtime, same size.
+    edit("packages/x/src/tool.sh", "#!/bin/sh\necho hi\n", BASE);
+    commitAll();
+    edit("packages/x/src/tool.sh", "#!/bin/sh\necho bye\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask, file already dirty").not.toBeNull();
+    submitPrompt();
+    fs.chmodSync(path.join(repo, "packages/x/src/tool.sh"), 0o755);
+    setMtime(path.join(repo, "packages/x/src/tool.sh"), BASE); // mtime and size unmoved
+    expect(fire(), "only the mode changed, and it is reviewable").not.toBeNull();
+  });
+
+  it("still discriminates filenames with spaces and non-ASCII", () => {
+    // Both files exist in the baseline; only one of them then changes. A hook that
+    // mangled -z paths would compute a key that cannot track either of them.
+    edit("packages/x/src/te st.ts", "export const a = 1;\n", BASE);
+    edit("packages/x/src/tëst.ts", "export const b = 1;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask covers both").not.toBeNull();
+    submitPrompt();
+    expect(fire(), "neither moved").toBeNull();
+    submitPrompt();
+    edit("packages/x/src/tëst.ts", "export const b = 22;\n", BASE);
+    expect(fire(), "the non-ASCII one moved, same second").not.toBeNull();
+  });
+
+  it("still re-arms on a same-second edit to an already-dirty file", () => {
+    // Equal size AND the same second is the documented blind spot, so the fixture
+    // changes length: this asserts the mtime+size key still discriminates with the
+    // turn comparison layered on top, not that the blind spot was closed.
+    edit("packages/x/src/committed.ts", "export const a = 2;\n", BASE);
+    submitPrompt();
+    expect(fire(), "first ask of the session").not.toBeNull();
+    submitPrompt();
+    expect(fire(), "baseline matches").toBeNull();
+    submitPrompt();
+    edit("packages/x/src/committed.ts", "export const a = 30;\n", BASE);
+    expect(fire(), "same second, different size").not.toBeNull();
+  });
+});
+
+describe("the message", () => {
+  it("does not claim the user wrote the code", () => {
+    // In a shared checkout "Just written code?" asserts something about YOU that
+    // is false, and stays false for the concurrent writes the turn window cannot
+    // exclude. A nudge that is wrong about what you did erodes compliance faster
+    // than one that is merely frequent.
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    const msg = fire()!;
+    expect(msg, "false authorship claim").not.toContain("Just written");
+    expect(msg).toContain("Unreviewed changes in the tree?");
+    expect(msg.split("\n").length, "the line cap still stands").toBeLessThan(13);
   });
 });
