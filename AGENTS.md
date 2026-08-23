@@ -142,8 +142,10 @@ case for each before believing the fix is done.
 
 - **Public at `github.com/lukaso/review-loop`** since 2026-08-23. `v0.2.0` (the
   turn window) and `v0.2.1` (the shim's `-x` guard) are tagged, released and
-  pushed; `HEAD` is `bbb4d90`. **`v0.2.2` is NOT released** — setup's activation
-  notice is uncommitted in the working tree, through seven review rounds.
+  pushed. **`v0.2.2` is COMMITTED and PUSHED** as `3c591c5` (2026-08-23) — the
+  activation notice plus five ways setup reported success over a dead install —
+  but it is **NOT yet tagged and has no GitHub release**; `v0.2.1` is still the
+  newest tag. Tag it before telling anyone it shipped.
 - **189 tests green** (99 hook, 72 setup, 9 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
   turn comparison, its plan condition, the dispatch and the baseline lifecycle.
   One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
