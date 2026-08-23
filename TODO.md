@@ -436,6 +436,56 @@ once, when there is a second consumer, rather than discovered. The question to
 answer then: does a vendored copy get the version stamp and the protocol check
 like any other, or does vendoring mean opting out of both?
 
+### 12. The line cap measures the wrong axis: it is lines x FREQUENCY
+
+**The cap is a proxy, and the code already disagrees with it.** Measured today:
+
+| notice | lines | fires |
+|---|---|---|
+| ordinary nudge | 6 | per turn |
+| not-installed | **7** | **once per session** |
+
+The LONGER message is already the RARER one, and the test only caps the nudge.
+Nobody wrote that down, so `< 13` reads as a universal law when the actual
+constraint is "do not wedge the session with text" — and a once-per-session
+notice does not wedge anything. **Per-notice budgets keyed to firing rate**, not
+one global line count. AGENTS.md should say why the cap exists, not just what it
+is, or the next person deletes it for the wrong reason or defends it for one.
+
+### 13. Split the plan message from the code message
+
+`$PLANS_CHANGED` already exists and already decides the suppression gate
+(`hooks/review-loop.sh:530`) — the hook KNOWS which trigger fired and throws it
+away, emitting an "or" the reader has to resolve. Splitting them makes each
+message shorter AND more actionable, and it directly serves [[12]].
+
+**Do this in the SAME edit as dropping the gstack skill names** (the item already
+queued as next in AGENTS.md: `/code-review` and `/plan-eng-review` are not
+built-ins and have shipped to strangers since v0.2.0). Both rewrite the same
+string; doing them separately means writing it twice and reviewing it twice.
+
+**Risk to carry:** two messages are two surfaces for a clause to accrete on. The
+25-line incident happened once with ONE message. Whatever replaces the flat cap
+has to survive being applied in two places — which is the same "one rule, N call
+sites" shape that produced every defect in rounds 9-13.
+
+### 14. Should the nudge be visible to the USER at all?
+
+**The question.** The `< 13` cap exists to stop a wedge of text in the session.
+If the text could reach the model WITHOUT rendering to the user, the constraint
+dissolves and [[12]] and [[13]] get much cheaper. Whether Claude Code offers such
+a channel is an empirical question about the hook output schema — **verify it,
+do not recall it.**
+
+**The argument AGAINST hiding it, which should be answered before anyone builds
+it.** The visible text is what makes this tool auditable by the human. On
+2026-08-23 the assistant twice claimed to have launched a review it had not
+launched, and both times the user caught it — once with "you say you launched a
+review, but I don't see a review". A model-only channel makes the loop's own
+behaviour unobservable to the person it works for, in a tool whose defining
+failure is silence that looks like health. The cure for a wedge of text is
+fewer, shorter, better-targeted messages ([[12]], [[13]]) — not invisibility.
+
 ## Deferred
 
 - **Fire on plan-mode approval.** `CLAUDE_PLAN_FILE` was probed and is unset, so
