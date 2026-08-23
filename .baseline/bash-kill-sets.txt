@@ -1,0 +1,10 @@
+impl-install-msg-bare: names itself when an install fails, rather than leaking install(1)|
+shim-install-msg-bare: names itself when the SHIM install fails, not just the machine copy|
+mkdir-claude-msg-bare: names itself when .claude cannot be created|
+cdpath-target-dropped: installs into the named target even with CDPATH set|
+cd-stderr-unsilenced: refuses a target it cannot enter, instead of operating on /|
+jq-rerun-deleted: refuses an unmergeable settings.json before touching anything outside the repo|shows jq's own diagnosis when the merge fails, prefixed|
+loop-counter-off: does not hang on a symlink loop|refuses when the MACHINE side cannot be resolved, not just the shim side|
+empty-readlink-guard: names the real problem when a symlink target strips to empty|
+collision-never-fires: refuses a DANGLING .claude/hooks symlink aimed at the machine copy|refuses a RELATIVE symlink aimed at the machine copy|refuses the collision BEFORE either install runs|refuses when .claude/hooks is symlinked onto the machine copy's directory|refuses when the machine copy and the shim are the same file|
+regular-or-absent-off: leaves nothing behind in the repo when a guard refuses|refuses a shim destination symlinked to a directory, without writing outside the repo|refuses when settings.json is not a regular file, instead of moving INTO it|refuses when the impl destination is a directory, instead of nesting inside it|refuses when the shim destination is a directory, instead of nesting inside it|
