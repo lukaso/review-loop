@@ -391,6 +391,35 @@ change — decoupled from the release version, so it moves rarely. `[ "$a" -lt
 the same shape as every defect rounds 9-13 found: a correct rule applied at one
 site out of several.
 
+**NEGOTIATION, NOT A GATE — the constraint that decides the whole design.** The
+committed-shim pattern has a notorious failure mode: `git-secrets` in a
+pre-commit hook, missing on a teammate's machine, blocks every commit. This tool
+is already immune to that shape *by exit code* — measured, implementation absent:
+`rc=0` on all three events, stderr empty, one Stop-only `additionalContext`
+notice with no `decision` field. Nobody is ever blocked.
+
+But the same disease has a different organ here: **stderr or a corrupted stdout
+breaks the turn**, and that has been hit twice — `v0.2.1` (a non-executable
+implementation leaking `Permission denied`) and [[9]] (a `cd` echoing a bare line
+ahead of the JSON). A version check is a new opportunity to reintroduce exactly
+that, so:
+
+- a mismatch NEVER prevents the exec — run anyway, degraded
+- the note goes through the EXISTING once-per-session Stop channel, never stderr,
+  never a second stdout writer
+- the implementation must work with the OLDEST shim it will ever meet; the
+  protocol number gates only OPTIONAL inputs
+- if a new implementation genuinely cannot function with an old shim, the
+  protocol bump is the WRONG TOOL — that is rebuilding git-secrets by accident
+
+**The collision to design for.** "Not installed" and "shim too old" are mutually
+exclusive by construction (if the implementation is running, it is installed).
+But "shim too old" and the ORDINARY NUDGE both come from the implementation, on
+one Stop event, into a single `additionalContext` — against a `< 13` line cap
+enforced by a test. Accreting a clause is how that message reached 25 lines once.
+Decide up front whether the stale note suppresses the nudge, shares its budget,
+or waits for a turn with nothing else to say.
+
 **Related:** [[7]] and [[8]] fold into the port; this one does not — it is
 useful in bash today and survives the port unchanged.
 
