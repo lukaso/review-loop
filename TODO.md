@@ -360,6 +360,53 @@ would be a fourth executable change made in response to a P4, on a release that
 has already converged. `CDPATH= cd --` is the one-line fix when the hook is next
 opened; it is NOT dead code, because the failing case above is constructible.
 
+### 10. Version BOTH halves, and let the implementation own compatibility
+
+**The shape.** Stamp a version into `$IMPL` at install, and give the committed
+shim a **protocol integer**. The shim announces its own with
+`REVIEW_LOOP_SHIM_VERSION=<n>` before exec'ing; the implementation carries
+`MIN_SHIM_PROTOCOL` and nudges through the existing once-per-session channel when
+the repo's shim is behind.
+
+**Why the IMPLEMENTATION owns the check, not the shim.** The two halves change by
+completely different mechanisms, and that asymmetry decides everything:
+
+| | changes how | who consents |
+|---|---|---|
+| `$IMPL` | machine-global refresh from ANY repo | nobody — it just moves |
+| shim | a human runs setup AND commits | a person, per repo |
+
+So the half that moves without consent must be the half that detects the
+mismatch. A check living in the shim bakes a constant that goes stale in every
+consuming repo and can only be corrected by N commits. **The shim stays dumb;
+all compatibility logic lives where one fix reaches every repo.**
+
+**Absence is the signal.** An old shim exports nothing, so an unset variable
+reads as "older than the first versioned shim" — no bootstrap problem, and it
+lands on the noisy side, which is the rule this project decides everything by.
+
+**An INTEGER, not semver.** The protocol bumps only when the shim genuinely must
+change — decoupled from the release version, so it moves rarely. `[ "$a" -lt
+"$b" ]` has exactly one call site. A semver comparator in POSIX shell would be
+the same shape as every defect rounds 9-13 found: a correct rule applied at one
+site out of several.
+
+**Related:** [[7]] and [[8]] fold into the port; this one does not — it is
+useful in bash today and survives the port unchanged.
+
+### 11. Do we need gstack's four install shapes?
+
+gstack detects `global-git`, `local-git`, `vendored` and `vendored-global`, and
+upgrades differently for each. review-loop supports one shape (a clone plus
+`./setup`), and `chiefofstaff` already carries a **vendored** copy with a
+provenance header and a body SHA — so the vendored case exists in practice
+whether or not it is supported in design.
+
+**Parked deliberately as overkill for now.** Recorded so the decision is made
+once, when there is a second consumer, rather than discovered. The question to
+answer then: does a vendored copy get the version stamp and the protocol check
+like any other, or does vendoring mean opting out of both?
+
 ## Deferred
 
 - **Fire on plan-mode approval.** `CLAUDE_PLAN_FILE` was probed and is unset, so
