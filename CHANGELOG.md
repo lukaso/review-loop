@@ -4,6 +4,36 @@ Shape borrowed from gstack: a bolded headline sentence, then what actually
 happened, then the numbers that back it. Every claim here is a measurement — if a
 number cannot be reproduced it is deleted rather than repeated.
 
+## [0.2.1] - 2026-08-23
+
+**The shim treated a non-executable implementation as runnable, and leaked
+`Permission denied` to stderr — which breaks the turn.**
+
+`[ -x "$IMPL" ]` was correct; nothing tested it. A copy that dropped the mode bit
+(a zip, a checkout without the exec bit, `cp` without `-p`) leaves a file that
+exists and cannot run. Mutating `-x` to `-e` passed the entire suite while making
+the shim write to stderr — the one thing a hook must never do. The jq-missing exit
+code was unpinned the same way.
+
+Both are now pinned, each by a test that kills exactly its own mutant.
+
+### How they were found
+
+Not by reading the code. By enumerating mutation targets **from the diff** rather
+than choosing them by hand, which is the difference this release exists to
+demonstrate:
+
+| | |
+| --- | --- |
+| Targets enumerated from a 40-line file | 5 |
+| Survivors | 3 |
+| Verified real gaps | **2** |
+| Equivalent mutants | 1 |
+
+The file had been written test-first and hand-mutated the same day, with five
+mutants chosen by attention. Attention missed both. Enumeration found them in five
+seconds.
+
 ## [0.2.0] - 2026-08-23
 
 **The nudge now asks about what THIS turn changed, instead of every dirty file in

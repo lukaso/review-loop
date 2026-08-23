@@ -115,6 +115,48 @@ describe("shim — with the implementation MISSING", () => {
     expect(fire({ event: "Stop", impl: null, session: "shim-2" }), "a new session is told").not.toBe("");
   });
 
+  it("treats a non-executable implementation as missing", () => {
+    // `-x`, not `-e`. A copy that dropped the mode bit (a zip, a checkout with no
+    // exec bit, `cp` without -p) leaves a file that exists and cannot run. Under
+    // `-e` the shim tries to run it, the pipeline fails, and bash writes
+    // "Permission denied" to STDERR — which breaks the turn, the one thing this
+    // file must never do. Found by enumerating mutation targets from the diff
+    // rather than by choosing them; the hand-picked set missed it.
+    const impl = path.join(tmp, "not-executable.sh");
+    fs.copyFileSync(REAL, impl);
+    fs.chmodSync(impl, 0o644);
+    const res = spawnSync("bash", [SHIM], {
+      input: JSON.stringify({ session_id: "nx", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      env: { ...process.env, REVIEW_LOOP_IMPL: impl, REVIEW_LOOP_STATE_DIR: stateDir },
+    });
+    expect(res.status, "never blocks").toBe(0);
+    expect(res.stderr, "a permission error must not reach stderr").toBe("");
+    expect(res.stdout, "and it must say it is not installed, not go quiet").toContain("not installed");
+  });
+
+  it("exits 0 when jq is unavailable, rather than erroring", () => {
+    // The not-installed notice needs jq to read the event and emit JSON, so
+    // without it the shim gives up — but it must give up with exit 0. A non-zero
+    // exit from a hook is an error to the harness, and this path is reachable on
+    // any machine where the implementation is missing AND jq is not installed,
+    // which is exactly a fresh machine before setup has run.
+    const shimDir = fs.mkdtempSync(path.join(tmp, "nojq-"));
+    for (const bin of ["bash", "cat", "tr", "cut"]) {
+      const real = spawnSync("command", ["-v", bin], { shell: true, encoding: "utf8" }).stdout.trim();
+      if (real) fs.symlinkSync(real, path.join(shimDir, bin));
+    }
+    expect(fs.existsSync(path.join(shimDir, "jq")), "jq must be absent").toBe(false);
+    const res = spawnSync(path.join(shimDir, "bash"), [SHIM], {
+      input: JSON.stringify({ session_id: "nojq", cwd: repo, hook_event_name: "Stop", stop_hook_active: false }),
+      encoding: "utf8",
+      env: { PATH: shimDir, REVIEW_LOOP_IMPL: path.join(tmp, "absent.sh"), REVIEW_LOOP_STATE_DIR: stateDir },
+    });
+    expect(res.status, "a non-zero hook exit is an error to the harness").toBe(0);
+    expect(res.stdout, "nothing it could validly emit").toBe("");
+    expect(res.stderr, "and nothing on stderr either").toBe("");
+  });
+
   it("survives an environment with no HOME", () => {
     // The default implementation path is under $HOME, and two spawn sites in the
     // hook's own suite replace the environment wholesale with no HOME at all.

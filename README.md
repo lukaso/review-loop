@@ -140,7 +140,7 @@ resumed turns on the user's own diff.
 npm install && npm test
 ```
 
-99 tests. Every "→ silent" assertion carries a positive companion in the same
+131 tests. Every "→ silent" assertion carries a positive companion in the same
 fixture: without one, a hook that emits nothing passes half the suite.
 
 ## Portability notes

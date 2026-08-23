@@ -117,7 +117,7 @@ detail. Do not inline rules into it.
 
 - Committed at `dc3f599` on `main`, plus the turn-window attribution slice in the
   working tree. **No remote, nothing pushed.**
-- **129 tests green** (99 hook, 14 setup, 7 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
+- **131 tests green** (99 hook, 14 setup, 9 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
   turn comparison, its plan condition, the dispatch and the baseline lifecycle.
   One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
   cannot change the outcome, but the state it guards resolves to silence); two
@@ -211,7 +211,7 @@ anything this tool fixes.
 ## Quick reference
 
 ```bash
-npm test                    # 129 tests, ~35s, no network, no ports
+npm test                    # 131 tests, ~38s, no network, no ports
 bash -n hooks/review-loop.sh && ./hooks/review-loop.sh < payload.json
 ```
 
