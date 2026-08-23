@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# review-loop setup — installs the STANDARD into a repo and the IMPLEMENTATION
+# onto this machine.
+#
+#   ~/.claude/hooks/review-loop.sh        the real hook   (machine, one copy)
+#   <repo>/.claude/hooks/review-loop.sh   the shim        (committed)
+#   <repo>/.claude/settings.json          3 registrations (committed)
+#
+# Why split: the registration and this repo's REVIEW_LOOP_PATHS are a repo
+# standard and belong in the repo; the 500 lines that implement it are a machine
+# concern, and committing those would make every upstream fix a commit in every
+# consuming repo.
+#
+# settings.json IS A CONTESTED FILE — other tools register hooks there, and one of
+# them commits the whole index with no pathspec. Rules, in order of importance:
+#   1. merge, never replace; preserve every item we did not write
+#   2. refuse a file we cannot parse — never "repair" it
+#   3. back up before the first mutation
+#   4. never `git add`, never commit
+#   5. hold a lock: setup runs on EVERY update, so a lost update is not rare
+set -u
+
+SRC=$(cd "$(dirname "$0")" && pwd)
+TARGET=$PWD
+PATHS=""
+TIMEOUT=10
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET=$2; shift 2 ;;
+    --paths)  PATHS=$2; shift 2 ;;
+    -h|--help)
+      cat <<'USAGE'
+review-loop setup — install the review nudge into a repo.
+
+Usage: ./setup [--target <repo>] [--paths "<git pathspecs>"]
+
+  --target <repo>   repo to install into (default: current directory)
+  --paths "<spec>"  REVIEW_LOOP_PATHS for this repo, e.g.
+                    ". :(exclude)prototypes/ :(exclude)notes.md"
+                    Applied identically to all three registrations.
+
+Installs the implementation to $REVIEW_LOOP_IMPL (default
+~/.claude/hooks/review-loop.sh) and commits nothing.
+USAGE
+      exit 0 ;;
+    *) echo "setup: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+for _bin in jq cat cp mkdir install rmdir; do
+  command -v "$_bin" >/dev/null 2>&1 || { echo "setup: missing required tool: $_bin" >&2; exit 2; }
+done
+
+[ -d "$TARGET" ] || { echo "setup: not a directory: $TARGET" >&2; exit 2; }
+TARGET=$(cd "$TARGET" && pwd)
+
+IMPL=${REVIEW_LOOP_IMPL:-${HOME:-}/.claude/hooks/review-loop.sh}
+[ -n "${IMPL#/.claude/hooks/review-loop.sh}" ] || { echo "setup: no HOME and no REVIEW_LOOP_IMPL" >&2; exit 2; }
+
+# ── 1. the implementation, on this machine ───────────────────────────────────
+mkdir -p "$(dirname "$IMPL")" || exit 2
+install -m 755 "$SRC/hooks/review-loop.sh" "$IMPL" || exit 2
+
+# ── 2. the shim, committed into the repo ─────────────────────────────────────
+mkdir -p "$TARGET/.claude/hooks" || exit 2
+install -m 755 "$SRC/hooks/review-loop-shim.sh" "$TARGET/.claude/hooks/review-loop.sh" || exit 2
+
+SETTINGS="$TARGET/.claude/settings.json"
+LOCK="$SETTINGS.lock"
+
+# ── 3. the lock ──────────────────────────────────────────────────────────────
+# `mkdir` is the primitive: it is atomic on every POSIX filesystem, unlike
+# test-then-create. A stale lock is taken over after 30s so a killed run cannot
+# block this repo forever; a FRESH lock is a hard failure, NOT a skip. gstack
+# skips and warns because its system is convergent — ours is not, and a skipped
+# install that exits 0 leaves the user believing the hook is registered.
+lock_age() {
+  if stat -c %Y "$LOCK" >/dev/null 2>&1; then echo $(( $(date +%s) - $(stat -c %Y "$LOCK") ))
+  elif stat -f %m "$LOCK" >/dev/null 2>&1; then echo $(( $(date +%s) - $(stat -f %m "$LOCK") ))
+  else echo 0; fi
+}
+if ! mkdir "$LOCK" 2>/dev/null; then
+  AGE=$(lock_age)
+  if [ "$AGE" -gt 30 ]; then
+    rm -rf "$LOCK" 2>/dev/null || true
+    mkdir "$LOCK" 2>/dev/null || { echo "setup: could not take over the stale lock at $LOCK" >&2; exit 3; }
+    echo "setup: took over a stale lock (${AGE}s old)"
+  else
+    echo "setup: settings.json is locked by another run (${AGE}s old): $LOCK" >&2
+    echo "setup: nothing was changed. Retry, or remove that directory if no setup is running." >&2
+    exit 3
+  fi
+fi
+# Released on EVERY exit path, including the error ones below. Without this a
+# refusal to parse would leave a lock that blocks the next run for 30s.
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+# ── 4. read, refusing what we cannot parse ───────────────────────────────────
+if [ -f "$SETTINGS" ]; then
+  CURRENT=$(jq '.' "$SETTINGS" 2>/dev/null) || {
+    echo "setup: cannot parse $SETTINGS — refusing to touch it." >&2
+    echo "setup: fix the JSON (or move it aside) and re-run. Nothing was changed." >&2
+    exit 4
+  }
+else
+  CURRENT='{}'
+fi
+
+CMD="\"\$CLAUDE_PROJECT_DIR/.claude/hooks/review-loop.sh\""
+[ -n "$PATHS" ] && CMD="REVIEW_LOOP_PATHS=\"$PATHS\" $CMD"
+
+# ── 5. merge ─────────────────────────────────────────────────────────────────
+# Identity is INTRINSIC — an item is ours iff its command names review-loop.sh.
+# Not a tag we write: Claude Code strips unknown keys when it rewrites this file,
+# so a marker would silently vanish and we would duplicate on the next run.
+#
+# `strip_ours` removes our ITEMS, not their groups: a group we share with a
+# foreign hook keeps the foreign hook and loses only us. Dropping whole groups
+# would delete somebody else's gate, which is the worst thing this script could do.
+UPDATED=$(printf '%s' "$CURRENT" | jq \
+  --arg cmd "$CMD" --argjson timeout "$TIMEOUT" '
+  def strip_ours:
+    map(.hooks = ((.hooks // []) | map(select((.command // "") | test("review-loop\\.sh") | not))))
+    | map(select((.hooks // []) | length > 0));
+  def ensure($ev):
+    .hooks[$ev] = ((.hooks[$ev] // []) | strip_ours)
+                + [{ hooks: [{ type: "command", command: $cmd, timeout: $timeout }] }];
+  (.hooks //= {})
+  | ensure("SessionStart") | ensure("UserPromptSubmit") | ensure("Stop")
+') || { echo "setup: failed to build the merged settings; nothing was changed." >&2; exit 5; }
+
+# ── 6. write only if it actually changed ─────────────────────────────────────
+# Compared canonically, so re-running setup is a TRUE no-op: no rewrite, no
+# pointless backup, and no diff for the user to wonder about.
+if [ "$(printf '%s' "$CURRENT" | jq -S -c '.')" = "$(printf '%s' "$UPDATED" | jq -S -c '.')" ]; then
+  echo "setup: already installed and up to date — nothing to change."
+  exit 0
+fi
+
+if [ -f "$SETTINGS" ]; then
+  BAK="$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$SETTINGS" "$BAK" || exit 5
+  echo "setup: backed up $SETTINGS -> $(basename "$BAK")"
+fi
+
+TMP="$SETTINGS.tmp.$$"
+printf '%s\n' "$UPDATED" > "$TMP" || exit 5
+mv -f "$TMP" "$SETTINGS" || { rm -f "$TMP"; exit 5; }
+
+echo "setup: installed."
+echo "  implementation: $IMPL"
+echo "  shim:           $TARGET/.claude/hooks/review-loop.sh"
+echo "  registered:     SessionStart, UserPromptSubmit, Stop"
+echo "setup: nothing was staged or committed — commit .claude/ yourself when ready."
+exit 0

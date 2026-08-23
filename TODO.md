@@ -119,22 +119,32 @@ machine. Verified from `~/.claude/skills/gstack`:
 - [ ] **Create `github.com/lukaso/review-loop`.** `gh` is installed (2.66.1) and
       authenticated as `lukaso`, so `gh repo create lukaso/review-loop --public
       --source=. --remote=origin` works from the existing local repo.
-- [ ] **Add a real `LICENSE` (MIT).** `package.json` **already declares
+- [x] **Add a real `LICENSE` (MIT).** Done 2026-08-23. `package.json` **already declares
       `"license": "MIT"` with no LICENSE file present** — that is a false claim
       today. Harmless while unpublished; not harmless once it is on GitHub.
-- [ ] **Decide the single source of version truth, then enforce it.**
+- [x] **Decide the single source of version truth, then enforce it.** Done:
+      `VERSION` is truth at 3-digit semver, `bin/review-loop-version-bump` writes
+      both it and `package.json`, and a test asserts they agree — the test gstack
+      does not have, which is why they need a four-state drift classifier.
       `package.json` says `0.1.0`; a gstack-style `VERSION` file would be a
       second copy. Two version strings that can drift is a bug generator. Either
       generate one from the other in the bump script, or pick one and have the
       update check read it. Do NOT hand-maintain both.
-- [ ] **`setup` script** that copies `hooks/review-loop.sh` into a target
+- [x] **`setup` script** Done 2026-08-23, with the standard/implementation split.
+      Original text kept below for the reasoning.
+- [ ] ~~**`setup` script**~~ that copies `hooks/review-loop.sh` into a target
       project and registers the `Stop` hook in `.claude/settings.json`. It must
       MERGE into an existing hooks array, never overwrite one — other tools
       register Stop hooks too, and clobbering a project's `commit-gate` or
       `verify-build` hook would be a serious regression.
 - [ ] **Install into chiefofstaff via that script**, so the install path is
       exercised by its first real user rather than by hand.
-- [ ] **`CHANGELOG.md`**, starting at the first tagged release.
+- [x] **`CHANGELOG.md`**, in gstack's shape. Done 2026-08-23.
+- [ ] **`update-check`** — deferred deliberately: its job is comparing against
+      published releases and there are none yet. The mechanisms to carry over are
+      recorded in the plan (fail LOUD on crash; SHA-pinned raw URL because branch
+      raw is stale for minutes after a push; semver-order guard; validate the
+      response is a version and not an HTML error page).
 
 ### Constraint carried over
 

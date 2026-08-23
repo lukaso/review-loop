@@ -117,7 +117,7 @@ detail. Do not inline rules into it.
 
 - Committed at `dc3f599` on `main`, plus the turn-window attribution slice in the
   working tree. **No remote, nothing pushed.**
-- **99 tests green**, and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
+- **129 tests green** (99 hook, 14 setup, 7 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
   turn comparison, its plan condition, the dispatch and the baseline lifecycle.
   One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
   cannot change the outcome, but the state it guards resolves to silence); two
@@ -126,6 +126,12 @@ detail. Do not inline rules into it.
   agreement of that reset got the test it was missing. The
   review agent's own harness reported 25 across four rounds, also all killed —
   that second number is its measurement, not one reproduced in this repo.
+- **`setup` exists** as of 2026-08-23, and it installs the SPLIT: the
+  implementation to `~/.claude/hooks/`, a committed shim plus three registrations
+  into the target repo. The standard belongs to the repo; the implementation
+  belongs to the machine. This repo is the one exception — its own
+  `.claude/settings.json` points straight at `hooks/review-loop.sh`, because here
+  that file IS the implementation and a shim would only indirect to a stale copy.
 - **Installed on itself** as of 2026-08-22: `.claude/settings.json` registers all
   three events against `$CLAUDE_PROJECT_DIR/hooks/review-loop.sh` — its own source,
   no vendored copy, so there is nothing to drift. It had NOT been dogfooded here
@@ -205,7 +211,7 @@ anything this tool fixes.
 ## Quick reference
 
 ```bash
-npm test                    # 99 tests, ~29s, no network, no ports
+npm test                    # 129 tests, ~35s, no network, no ports
 bash -n hooks/review-loop.sh && ./hooks/review-loop.sh < payload.json
 ```
 

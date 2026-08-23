@@ -1,10 +1,23 @@
 {
   "name": "review-loop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Claude Code Stop hook that keeps the fix-review-fix loop running until findings are resolved.",
   "license": "MIT",
   "type": "module",
-  "files": ["hooks/", "README.md"],
-  "scripts": { "test": "vitest run" },
-  "devDependencies": { "vitest": "^3.0.0", "typescript": "^5.6.0" }
+  "files": [
+    "hooks/",
+    "setup",
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "typescript": "^5.6.0"
+  }
 }

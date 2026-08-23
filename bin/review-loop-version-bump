@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# review-loop-version-bump — the ONLY thing that writes a version here.
+#
+#   VERSION        plain text, 3-digit semver, the source of truth
+#   package.json   written from it, never by hand
+#
+# gstack keeps the same two copies and needed a 528-line classifier with four
+# drift states and a `repair` verb, because two hand-maintained versions drift.
+# One writer plus one test that asserts they agree retires that whole class.
+#
+# 3 digits, not gstack's 4: their fourth allocates slots in a PR queue and this
+# repo has no queue.
+set -u
+
+LEVEL=${1:-}
+case "$LEVEL" in
+  major|minor|patch) : ;;
+  *) echo "usage: review-loop-version-bump <major|minor|patch>" >&2; exit 2 ;;
+esac
+
+command -v jq >/dev/null 2>&1 || { echo "bump: jq is required" >&2; exit 2; }
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "bump: not a git repo" >&2; exit 2; }
+cd "$ROOT" || exit 2
+[ -f VERSION ] || { echo "bump: no VERSION file at $ROOT" >&2; exit 2; }
+
+CUR=$(tr -d '[:space:]' < VERSION)
+case "$CUR" in
+  [0-9]*.[0-9]*.[0-9]*) : ;;
+  *) echo "bump: VERSION is not 3-digit semver: '$CUR'" >&2; exit 2 ;;
+esac
+
+# ALREADY BUMPED? gstack's own comment calls re-bumping an already-bumped branch
+# the single worst footgun in their ship flow. It is cheap to detect and
+# impossible to undo cleanly once it has been pushed, so refuse rather than guess.
+# No HEAD yet (a fresh repo) is not "already bumped", it is nothing to compare to.
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+  COMMITTED=$(git show HEAD:VERSION 2>/dev/null | tr -d '[:space:]' || echo "")
+  if [ -n "$COMMITTED" ] && [ "$COMMITTED" != "$CUR" ]; then
+    echo "bump: VERSION is already $CUR, ahead of HEAD's $COMMITTED — already bumped." >&2
+    echo "bump: commit or reset that bump first. Nothing was changed." >&2
+    exit 3
+  fi
+fi
+
+MAJOR=${CUR%%.*}; REST=${CUR#*.}; MINOR=${REST%%.*}; PATCH=${REST#*.}
+case "$LEVEL" in
+  major) MAJOR=$(( MAJOR + 1 )); MINOR=0; PATCH=0 ;;
+  minor) MINOR=$(( MINOR + 1 )); PATCH=0 ;;
+  patch) PATCH=$(( PATCH + 1 )) ;;
+esac
+NEXT="$MAJOR.$MINOR.$PATCH"
+
+printf '%s\n' "$NEXT" > VERSION || exit 4
+if [ -f package.json ]; then
+  # Write via a temp so a jq failure cannot leave a truncated manifest — the
+  # half-write state gstack's DRIFT_STALE_PKG exists to report after the fact.
+  jq --arg v "$NEXT" '.version = $v' package.json > package.json.tmp.$$ \
+    && mv -f package.json.tmp.$$ package.json \
+    || { rm -f package.json.tmp.$$; echo "bump: VERSION written but package.json failed — they now disagree" >&2; exit 4; }
+fi
+
+echo "$NEXT"
