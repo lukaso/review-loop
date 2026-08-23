@@ -100,7 +100,10 @@ Whether this repo reviews its changes, and which paths it watches, is a property
 of the repo — so it is committed and arrives with the clone, rather than existing
 only for whoever remembered to install it. The 500 lines that implement it are a
 machine concern, so upstream fixes cost no commits in any consuming repo. Re-run
-`./setup` to update; a second run with nothing to change is a true no-op.
+`./setup` to update. A re-run always refreshes the machine copy and the committed
+shim — that is what it is for — and says so; it leaves `settings.json` alone when
+the registrations already match. A plain re-run keeps whatever `--paths` the repo
+was set up with.
 
 If the implementation is missing on a machine, the shim says so once per session
 through the ordinary nudge channel. It never goes quiet, and it never writes to
@@ -134,13 +137,41 @@ while claude was closed is already in the tree when the first resumed prompt tak
 its baseline, and is then never asked about. Measured without it: three silent
 resumed turns on the user's own diff.
 
+### Restart your session after installing
+
+**Claude Code reads hooks at startup.** Installing mid-session registers nothing
+that will fire, so until you restart you get no nudges at all — which looks
+exactly like a broken tool.
+
+```
+in a session:   to pick it up in '<target>', exit and run:
+                    claude --continue     # keeps the same conversation
+                    claude --resume       # pick a different session
+
+no session:     cd '<target>' && claude
+```
+
+Measured, not reasoned: before a `--continue` this repo had no state files for its
+own session; after one, `review-loop-turn-<session-id>` appeared. A resume reads
+settings at startup like any other start, so you get the tool without losing the
+conversation.
+`setup` prints this as its last line, and says it louder when it can tell it was
+run from inside a live session.
+
+This is not a footnote. It happened during development: installed, declared
+working, and it had not fired once. The miss was caught only because someone asked
+why nothing had prompted.
+
+When checking whether this tool works, check that it **ran** — the state files in
+`$REVIEW_LOOP_STATE_DIR` are the evidence — not that it is installed.
+
 ## Tests
 
 ```
 npm install && npm test
 ```
 
-131 tests. Every "→ silent" assertion carries a positive companion in the same
+189 tests. Every "→ silent" assertion carries a positive companion in the same
 fixture: without one, a hook that emits nothing passes half the suite.
 
 ## Portability notes

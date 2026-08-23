@@ -106,6 +106,31 @@ detail. Do not inline rules into it.
   Check **which** test fails, by name. A mutant killed by 30 tests but not by the
   one written for it means that test is not doing its job. Aim for disjoint kill
   sets: one mutant, one test.
+- **A DOMINATED assertion is as dead as an uncoverable guard.** Two refusal paths
+  asserted in one `it` looked like two tests and were one: every ordering mutant
+  that reached the second tripped the first and died there, so the second could
+  not fail. Found in round 7, on an assertion added in round 6 *for* the bug it
+  could not catch. One `it` per path, and prove it by mutating to the second path
+  alone.
+**THE RECURRING DEFECT IN THIS SLICE IS NOT A WRONG RULE — IT IS A RIGHT RULE
+APPLIED ONCE.** Five consecutive review rounds, each finding a bar-clearing bug in
+the PREVIOUS round's fix, and every one is the same shape:
+
+| round | the rule | applied to |
+|---|---|---|
+| 9  | "destination must be a regular file" | 1 of 3 destinations |
+| 10 | "carry the committed env prefix forward" | 1 of 2 branches |
+| 11 | "resolve the path before comparing" | 1 of 2 operands |
+| 12 | "follow the symlink" | 1 of 2 states (existing, not dangling) |
+| 12 | "an assignment may follow the pathspec" | 1 of N separators (space, not tab/newline) |
+| 13 | "refuse when the path cannot be resolved" | 1 of 2 callers — and the dead one *looked* identical |
+
+None was found by re-reading the rule; each was found by CONSTRUCTING the second
+site. When you fix anything here, the next question is not "is the rule right" —
+it is **"where else does this rule apply, and did I apply it there?"** Enumerate
+destinations, branches, operands, states and separators, and write the failing
+case for each before believing the fix is done.
+
 - **A surviving mutant means the path is uncovered.** Construct the case before
   concluding the guard is unnecessary — and if a guard genuinely cannot fail,
   **delete it** rather than write a test that cannot fail. Two were deleted on
@@ -113,11 +138,13 @@ detail. Do not inline rules into it.
 
 ---
 
-## State as of 2026-08-22
+## State as of 2026-08-23
 
-- Committed at `dc3f599` on `main`, plus the turn-window attribution slice in the
-  working tree. **No remote, nothing pushed.**
-- **131 tests green** (99 hook, 14 setup, 9 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
+- **Public at `github.com/lukaso/review-loop`** since 2026-08-23. `v0.2.0` (the
+  turn window) and `v0.2.1` (the shim's `-x` guard) are tagged, released and
+  pushed; `HEAD` is `bbb4d90`. **`v0.2.2` is NOT released** — setup's activation
+  notice is uncommitted in the working tree, through seven review rounds.
+- **189 tests green** (99 hook, 72 setup, 9 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
   turn comparison, its plan condition, the dispatch and the baseline lifecycle.
   One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
   cannot change the outcome, but the state it guards resolves to silence); two
@@ -183,6 +210,21 @@ mistake: a change that looked safe because it was *quieter*.
 Each was found by constructing the failing case, not by reading the code. If you
 touch the gate, construct one before you believe it is fine.
 
+**THE INSTALL IS INERT UNTIL THE SESSION RESTARTS.** Claude Code reads hooks at
+startup, so installing mid-session registers nothing that fires. For most of
+2026-08-23 that is exactly what this repo's own install was: present, correct, and
+not running — declared working on the strength of the files existing. It surfaced
+only when someone asked why no prompt had appeared after a plan was written AND
+after that plan was reviewed: two nudges the hook is built for, both owed, neither
+delivered. Verified afterwards in the natural flow, the plan trigger fires on
+both; the hook was never the problem.
+
+**When checking whether this tool works, check that it RAN** — the state files in
+`$STATE_DIR` are the evidence — not that it is installed. And the fix for a user
+is `claude --continue`, not "restart" — a resume fires `SessionStart` with
+`source: "resume"`, and this repo observed it directly: no state files for its own
+session before a `--continue`, a turn file immediately after one.
+
 **The trap that cost this slice a full rewrite: mtime is not git's notion of
 "changed".** The first implementation kept dirty paths whose mtime was not older
 than a marker. It was silently wrong four ways, all reproduced: `git mv`
@@ -200,18 +242,17 @@ the fail-open path), and asserting the ASK direction where only the SILENT
 direction can catch the bug. Exactly one test separates the turn gate from the
 older ask-once guard; if you delete that gate, only that one test fails.
 
-**Next up, in `TODO.md` order:** GitHub repo + MIT `LICENSE` (`package.json`
-already claims MIT with no licence file); versioning with a single source of
-truth; and a `setup` script that **merges** into `.claude/settings.json` rather
-than overwriting — clobbering a project's commit or push gate would be worse than
-anything this tool fixes.
+**Next up, in `TODO.md` order:** the message must stop naming gstack skills —
+`/code-review` and `/plan-eng-review` are not built-ins, and since 2026-08-23 that
+default ships to strangers. Then the mutation harness, whose plan is written and
+cleared through three PLAN-review rounds but PARKED.
 
 ---
 
 ## Quick reference
 
 ```bash
-npm test                    # 131 tests, ~38s, no network, no ports
+npm test                    # 189 tests, ~31s, no network, no ports
 bash -n hooks/review-loop.sh && ./hooks/review-loop.sh < payload.json
 ```
 

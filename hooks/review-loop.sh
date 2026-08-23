@@ -181,6 +181,12 @@ TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null)
 # Resolve symlinks on BOTH sides first. `git rev-parse --show-toplevel` returns a
 # PHYSICAL path, and on macOS a temp dir under /var is really /private/var — so a
 # textual prefix test silently never matches and the containment check is inert.
+# NO `CDPATH= cd --` HERE, and that is deliberate — a review round raised it as the
+# fourth site of the rule setup applies at three. Measured, not argued: line 104
+# has ALREADY made $STATE_DIR absolute, and bash never consults CDPATH for an
+# absolute operand. Confirmed by construction — with CDPATH pointing at a decoy
+# holding a same-named dir, the state files still landed in the real one. Adding a
+# guard that cannot fire is the same error as deleting one that can.
 _SD=$(cd "$STATE_DIR" 2>/dev/null && pwd -P) && STATE_DIR=$_SD
 case "$STATE_DIR/" in "$TOPLEVEL"/*) STATE_DIR=/tmp ;; esac
 
