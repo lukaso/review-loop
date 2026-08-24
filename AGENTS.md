@@ -166,10 +166,13 @@ case for each before believing the fix is done.
 
 - **Public at `github.com/lukaso/review-loop`** since 2026-08-23. `v0.2.0` (the
   turn window) and `v0.2.1` (the shim's `-x` guard) are tagged, released and
-  pushed. **`v0.2.2` is COMMITTED, PUSHED and TAGGED** as `3c591c5` (2026-08-23) —
-  the activation notice plus five ways setup reported success over a dead install.
-  It has **no GitHub release page yet**; the tag is on the remote and that is what
-  `setup`'s update check reads, so the release page is presentation, not delivery.
+  pushed, as is `v0.2.2`. **`v0.3.0` is COMMITTED, PUSHED and TAGGED** as `48b9ab9`
+  (2026-08-24) — `setup` ported to Node behind a bash wrapper. No GitHub release
+  pages exist for `v0.2.2` or `v0.3.0`; the tags are on the remote.
+  **THERE IS NO UPDATE CHECK AT ALL** — no `curl`, no API, nothing reads a version
+  anywhere. An earlier note here claimed the tag was "what setup's update check
+  reads"; that was invented. Upgrading is `git pull` in the clone plus a re-run,
+  and nothing tells anyone an update exists. Backlog items 10-11 are the design.
 - **232 tests green** (99 hook, 83 setup, 28 differential, 9 shim, 4 wrapper, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
   turn comparison, its plan condition, the dispatch and the baseline lifecycle.
   One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
@@ -267,6 +270,17 @@ from any dirt at all), firing twice off one prompt (the second `fire()` runs in
 the fail-open path), and asserting the ASK direction where only the SILENT
 direction can catch the bug. Exactly one test separates the turn gate from the
 older ask-once guard; if you delete that gate, only that one test fails.
+
+**`setup` IS NODE NOW.** `setup` is a ~90-line bash wrapper that finds node and
+execs `lib/setup.mjs`; `node` is a prerequisite and its absence exits **6**, its
+own code. `.baseline/setup-bash` is the bash original, kept ONLY as the
+differential harness's reference — **both die together**, and the harness is
+already invalid the moment backlog items 7 or 8 land, because those change
+behaviour on purpose. Do not weaken it; delete it.
+
+**What the port did NOT do:** items 7 and 8 are still open. The port is
+behaviour-preserving apart from three deliberate new refusals — un-round-trippable
+number literals, integer-like keys, and a non-regular file in `$SRC`.
 
 **Next up, in `TODO.md` order:** the message must stop naming gstack skills —
 `/code-review` and `/plan-eng-review` are not built-ins, and since 2026-08-23 that
