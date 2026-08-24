@@ -282,9 +282,13 @@ behaviour on purpose. Do not weaken it; delete it.
 behaviour-preserving apart from three deliberate new refusals — un-round-trippable
 number literals, integer-like keys, and a non-regular file in `$SRC`.
 
-**Next up, in `TODO.md` order:** the message must stop naming gstack skills —
-`/code-review` and `/plan-eng-review` are not built-ins, and since 2026-08-23 that
-default ships to strangers. Then the mutation harness, whose plan is written and
+**Next up, in `TODO.md` order:** the message names a command that does not exist
+for most readers. MEASURED 2026-08-24, because the earlier version of this note was
+half wrong: **`/code-review` IS a Claude Code built-in** (absent from
+`~/.claude/skills/`, and `/code-review ultra` is documented as a real command), so
+naming it is fine. **`/plan-eng-review` is a gstack skill** (present in
+`~/.claude/skills/`) and is what ships broken to anyone without gstack — through
+four released versions now. Then the mutation harness, whose plan is written and
 cleared through three PLAN-review rounds but PARKED.
 
 ---
