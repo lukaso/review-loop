@@ -469,12 +469,20 @@ like any other, or does vendoring mean opting out of both?
 
 **The cap is a proxy, and the code already disagrees with it.** Measured today:
 
-| notice | lines | fires |
-|---|---|---|
-| ordinary nudge | 6 | per turn |
-| not-installed | **7** | **once per session** |
+| notice | lines | non-blank | fires |
+|---|---|---|---|
+| ordinary nudge | **10** | 7 | per turn |
+| not-installed | 7 | 5 | once per session |
 
-The LONGER message is already the RARER one, and the test only caps the nudge.
+**CORRECTED 2026-08-24 — the first version of this table said the nudge was 6
+lines and concluded "the LONGER message is already the RARER one". Both were
+wrong, and inverted: the nudge is longer AND more frequent.** The correct figure
+was already in a comment at `test/review-loop.test.ts:554`. What survives is that
+the cap needs a REASON, and that a 7-line once-per-session notice is not a wedge —
+not that the code already obeys lines x frequency. It does the opposite.
+
+Headroom is **2 lines**, not 7: `< 13` against 10. And the cap is asserted in TWO
+places, `:557` and `:1958`, both on code-only fixtures.
 Nobody wrote that down, so `< 13` reads as a universal law when the actual
 constraint is "do not wedge the session with text" — and a once-per-session
 notice does not wedge anything. **Per-notice budgets keyed to firing rate**, not
