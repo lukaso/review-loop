@@ -70,9 +70,32 @@ slice.
 
 ## The message must not name gstack skills
 
-`/plan-eng-review` and `/code-review` are gstack skills, not built-ins. The
-shipped default names commands most users will not have. Make the message text a
-knob with a generic default; let a project override it.
+**MEASURED 2026-08-24, because the first version of this item was half wrong:**
+`/code-review` **IS a Claude Code built-in** — absent from `~/.claude/skills/`,
+and `/code-review ultra` is a documented command. Naming it is fine.
+`/plan-eng-review` **is a gstack skill** (present in `~/.claude/skills/`) and is
+the half that ships broken to anyone without gstack — four released versions now.
+
+**Detect the SKILL, not gstack.** `[ -d "$HOME/.claude/skills/plan-eng-review" ]`
+is the actual precondition — *does the command I am about to name exist?* It
+survives gstack renaming things, works for someone who has that skill from
+elsewhere, and is one predicate at one call site.
+
+**RUNTIME, in the hook — never baked in at install.** Whether a machine has a
+skill is a MACHINE fact; `settings.json` is a REPO standard, committed for
+everyone who clones. Baking it in would commit one developer's machine state into
+the repo, against the split this whole project is built on. A `stat` costs
+microseconds against a 10s budget.
+
+**Do NOT recommend gstack from `setup`.** Its output ends with the activation
+notice, whose own comment reads "LAST LINE, deliberately. Above the file list it
+is not read." Anything appended is unread; anything before it displaces the one
+thing that must be. It would also give a correctness tool a marketing dependency
+on a third party's naming — the dependency that produced this bug.
+
+**The principle, one level up:** describe the ACTION and name a command only when
+it is known to exist. Naming a tool is a convenience; describing the loop is the
+contract.
 
 Constrained by the `< 13` line cap in the suite, which exists because the message
 once reached 25 lines by accreting a clause per review round. **Length is a
@@ -459,9 +482,9 @@ is, or the next person deletes it for the wrong reason or defends it for one.
 away, emitting an "or" the reader has to resolve. Splitting them makes each
 message shorter AND more actionable, and it directly serves [[12]].
 
-**Do this in the SAME edit as dropping the gstack skill names** (the item already
-queued as next in AGENTS.md: `/code-review` and `/plan-eng-review` are not
-built-ins and have shipped to strangers since v0.2.0). Both rewrite the same
+**Do this in the SAME edit as gating `/plan-eng-review`** (the item already queued
+as next in AGENTS.md — `/code-review` is a built-in and stays; the gstack skill is
+what has shipped broken since v0.2.0). Both rewrite the same
 string; doing them separately means writing it twice and reviewing it twice.
 
 **Risk to carry:** two messages are two surfaces for a clause to accrete on. The
