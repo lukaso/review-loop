@@ -287,8 +287,15 @@ for most readers. MEASURED 2026-08-24, because the earlier version of this note 
 half wrong: **`/code-review` IS a Claude Code built-in** (absent from
 `~/.claude/skills/`, and `/code-review ultra` is documented as a real command), so
 naming it is fine. **`/plan-eng-review` is a gstack skill** (present in
-`~/.claude/skills/`) and is what ships broken to anyone without gstack — through
-four released versions now. Then the mutation harness, whose plan is written and
+`~/.claude/skills/`) and is not available to a reader who does not have gstack.
+
+**SEVERITY, stated precisely, because "ships broken" was written here first and
+overstates it two ways.** The skill is not broken — it works for anyone who has
+it. And nothing executes the message: it is `additionalContext`, text an agent
+reads. A reader without gstack gets one command that works (`/code-review`) and
+one that does not, and the nudge's actual job — *you have unreviewed work* —
+still lands. It is a wrong instruction in the user-facing output of a public
+tool, through four releases. That is worth fixing and is not a broken tool. Then the mutation harness, whose plan is written and
 cleared through three PLAN-review rounds but PARKED.
 
 ---

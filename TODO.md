@@ -74,7 +74,13 @@ slice.
 `/code-review` **IS a Claude Code built-in** — absent from `~/.claude/skills/`,
 and `/code-review ultra` is a documented command. Naming it is fine.
 `/plan-eng-review` **is a gstack skill** (present in `~/.claude/skills/`) and is
-the half that ships broken to anyone without gstack — four released versions now.
+simply not there for a reader without gstack.
+
+**Do not inflate this.** The skill works; it is review-loop that names it. Nothing
+executes the message — it is `additionalContext`, text an agent reads — so the
+failure is one dead-end instruction beside one that works, and the nudge still
+does its job. A wrong instruction in a public tool's user-facing output, through
+four releases. Worth fixing; not a broken tool.
 
 **Detect the SKILL, not gstack.** `[ -d "$HOME/.claude/skills/plan-eng-review" ]`
 is the actual precondition — *does the command I am about to name exist?* It
