@@ -171,7 +171,7 @@ When checking whether this tool works, check that it **ran** — the state files
 npm install && npm test
 ```
 
-189 tests. Every "→ silent" assertion carries a positive companion in the same
+232 tests. Every "→ silent" assertion carries a positive companion in the same
 fixture: without one, a hook that emits nothing passes half the suite.
 
 ## Portability notes

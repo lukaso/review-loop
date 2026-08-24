@@ -99,6 +99,11 @@ describe("setup — a fresh repo", () => {
     const cmds = ["SessionStart", "UserPromptSubmit", "Stop"].map((ev) => ourHooks(ev)[0]);
     expect(new Set(cmds.map((h) => h.command)).size, "commands differ across events").toBe(1);
     expect(new Set(cmds.map((h) => h.timeout)).size, "timeouts differ across events").toBe(1);
+    // PIN THE VALUE, not just its consistency. Changing 10 to anything else
+    // survived every test: the hook has ~10s to enumerate a dirty tree, and a
+    // shorter timeout turns a slow repo into silence — which is the one failure
+    // this tool may not have.
+    expect(cmds[0]?.timeout, "the registered timeout must stay 10s").toBe(10);
     expect(cmds[0].command).toContain(':(exclude)notes.md');
   });
 });
@@ -176,8 +181,9 @@ describe("setup — merging into a contested file", () => {
     writeForeign();
     run();
     const baks = fs.readdirSync(path.join(repo, ".claude")).filter((f) => f.startsWith("settings.json.bak"));
-    expect(baks.length, "no backup written").toBeGreaterThan(0);
-    expect(JSON.parse(fs.readFileSync(path.join(repo, ".claude", baks[0]), "utf8")), "backup is not the original")
+    const bak = baks[0];
+    expect(bak, "no backup written").toBeDefined();
+    expect(JSON.parse(fs.readFileSync(path.join(repo, ".claude", bak!), "utf8")), "backup is not the original")
       .toEqual(foreign);
   });
 
@@ -548,6 +554,14 @@ describe("setup — activation, the thing that made it look broken", () => {
       expect(res.status, "must refuse rather than report success").not.toBe(0);
       expect(res.stdout, "must not claim it installed").not.toMatch(/installed\./);
       expect(res.stderr, "must say which path is wrong").toContain(p);
+      // ASSERT THE GUARD'S OWN MESSAGE. Against bash, disabling regular_or_absent
+      // killed this test because `install(1)` NESTED the file inside the directory
+      // and exited 0. Node's copyFileSync+rename throws instead, so the run still
+      // fails — and the test passed for a different reason, silently ceasing to
+      // pin the guard. That is a kill-set regression, caught by diffing against
+      // .baseline/bash-kill-sets.txt, and the fix is to name what must refuse.
+      expect(res.stderr, "the not-a-regular-file guard must be what refuses")
+        .toMatch(/is not a regular file/);
       expect(fs.readdirSync(p), "must not have nested anything inside").toEqual([]);
     });
   }
@@ -881,8 +895,15 @@ describe("setup — activation, the thing that made it look broken", () => {
     // OWN TIMEOUT, deliberately: run() uses spawnSync with none, so a regression
     // here blocks the worker forever instead of failing. A test that hangs the
     // suite is not a test — it is an outage that looks like a slow build.
+    // killSignal SIGKILL, and it is load-bearing: a JS signal handler is never
+    // SCHEDULED during synchronous work, so a spinning Node setup cannot be
+    // killed by SIGTERM at all — measured, `timeout 10` failed to end it. bash
+    // processes traps between commands and dies. With the default SIGTERM this
+    // assertion could not fail: the mutant that removes the loop counter HUNG the
+    // runner instead of failing it, which reads as a slow suite rather than a
+    // missing guard.
     const res = spawnSync("bash", [SETUP], {
-      cwd: repo, encoding: "utf8", timeout: 15000,
+      cwd: repo, encoding: "utf8", timeout: 15000, killSignal: "SIGKILL",
       env: { ...process.env, REVIEW_LOOP_IMPL: impl,
              REVIEW_LOOP_SRC: path.resolve(__dirname, "..") },
     });
@@ -904,7 +925,11 @@ describe("setup — activation, the thing that made it look broken", () => {
     fs.symlinkSync(path.join(machine, "b"), path.join(machine, "hooks"));
     fs.symlinkSync(path.join(machine, "hooks"), path.join(machine, "b"));
     const res = spawnSync("bash", [SETUP], {
-      cwd: repo, encoding: "utf8", timeout: 15000,
+      // killSignal SIGKILL for the SAME reason as the loop test above — this
+      // fixture is also a symlink loop, and a Node child spinning synchronously
+      // cannot be killed by SIGTERM. Adding it at one of the two sites and not
+      // the other is the one-rule-N-call-sites shape this repo keeps finding.
+      cwd: repo, encoding: "utf8", timeout: 15000, killSignal: "SIGKILL",
       env: { ...process.env, REVIEW_LOOP_SRC: path.resolve(__dirname, ".."),
              REVIEW_LOOP_IMPL: path.join(machine, "hooks/review-loop.sh") },
     });
@@ -952,6 +977,165 @@ describe("setup — activation, the thing that made it look broken", () => {
       .toBe("OLD-IMPL-CONTENT");
   });
 
+  // THE PLAN SPECIFIED THESE FIXTURES AND THEY WERE NOT WRITTEN. Deleting the
+  // entire "verify, don't preserve" guard left all 220 tests green — which is how
+  // its refusal shipped BELOW both installs, writing $IMPL and creating a
+  // committed-looking shim before printing "Nothing was changed."
+  for (const [label, lit] of [
+    ["a trailing zero", "1.50"],
+    ["an integer above 2^53", "12345678901234567890"],
+    ["exponent notation", "1e3"],
+    ["negative zero", "-0"],
+  ] as const) {
+    it(`refuses rather than rewrite ${label} in a foreign entry`, () => {
+      fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+      fs.writeFileSync(settingsPath(), `{ "hooks": {}, "foreignTool": { "v": ${lit} } }`);
+      const res = run();
+      expect(res.status, "must refuse rather than silently canonicalise").not.toBe(0);
+      expect(res.stderr, "must name the literal it cannot preserve").toContain(lit);
+      // THE P1: a refusal must not have written anything first.
+      expect(fs.existsSync(impl), "the machine copy must be untouched").toBe(false);
+      expect(fs.existsSync(path.join(repo, ".claude/hooks/review-loop.sh")),
+        "no committed-looking shim may be left behind").toBe(false);
+      expect(fs.readFileSync(settingsPath(), "utf8"), "and settings.json is unchanged")
+        .toContain(lit);
+    });
+  }
+
+  it("installs normally when every foreign literal round-trips", () => {
+    // The false-reject direction. Canonical numbers are the ordinary case and must
+    // not be refused, or the guard would block every install that has a timeout.
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    // Measured, not assumed: 10 / 0.5 / -3 / 1000 round-trip; 1e20 becomes
+    // 100000000000000000000 and 1e21 becomes 1e+21, so BOTH are correctly refused.
+    // The guard is about the literal's TEXT, not the number's value.
+    fs.writeFileSync(settingsPath(), '{ "hooks": {}, "foreignTool": { "a": 10, "b": 0.5, "c": -3, "d": 1000 } }');
+    const res = run();
+    expect(res.status, `canonical literals must install: ${res.stderr}`).toBe(0);
+    expect(ourHooks("Stop").length).toBe(1);
+  });
+
+  it("refuses rather than reorder integer-like foreign keys", () => {
+    // JS puts integer-like keys first in ascending order regardless of where they
+    // appeared; jq preserved input order. {"10":..,"2":..} came back reordered —
+    // a silent rewrite of foreign data in a committed file, at a site the number
+    // scanner cannot see.
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(settingsPath(), '{ "hooks": {}, "foreignTool": { "10": "ten", "2": "two" } }');
+    const res = run();
+    expect(res.status, "must refuse").not.toBe(0);
+    expect(res.stderr, "must name the keys").toMatch(/integer-like keys/);
+    expect(fs.existsSync(impl), "and must refuse BEFORE installing anything").toBe(false);
+  });
+
+  it("replaces the machine copy by RENAME, never by truncating it in place", () => {
+    // $IMPL is machine-global and executed per turn by every shimmed repo.
+    // copyFileSync truncates in place (inode unchanged), so a hook mid-read
+    // resumes at its old offset inside new content. install(1) renamed; the port
+    // must too. The inode is the measurement that distinguishes them — a
+    // "running script survives" test would be racy and would flake.
+    run();
+    const before = fs.statSync(impl).ino;
+    run();
+    expect(fs.statSync(impl).ino, "same inode means it was truncated in place, not replaced")
+      .not.toBe(before);
+  });
+
+  it("installs 755 even when the source files are not executable", () => {
+    // writeFileSync({mode:0o755}) is MASKED by umask — measured, under `umask 077`
+    // it yields 0700. install(1) did not care. v0.2.1 was literally "a
+    // non-executable implementation leaked Permission denied to stderr", so this
+    // is that bug's second chance, and a tarball or an exec-bit-losing filesystem
+    // is all it takes to deliver a 644 source.
+    const src = path.join(tmp, "src");
+    fs.mkdirSync(path.join(src, "hooks"), { recursive: true });
+    for (const f of ["review-loop.sh", "review-loop-shim.sh"]) {
+      fs.copyFileSync(path.resolve(__dirname, "..", "hooks", f), path.join(src, "hooks", f));
+      fs.chmodSync(path.join(src, "hooks", f), 0o644);
+    }
+    const res = run([], { REVIEW_LOOP_SRC: src });
+    expect(res.status, `must install: ${res.stderr}`).toBe(0);
+    expect(fs.statSync(impl).mode & 0o777, "the machine copy must be executable").toBe(0o755);
+    expect(fs.statSync(path.join(repo, ".claude/hooks/review-loop.sh")).mode & 0o777,
+      "and so must the committed shim").toBe(0o755);
+  });
+
+  it("refuses a non-regular file in the source tree instead of hanging on it", () => {
+    // existsSync is TRUE for a FIFO, and copyFileSync then blocks FOREVER — with
+    // the lock taken and .claude already created. bash used `[ -f ]` and refused
+    // at once. A hang is the worst shape of silence this tool can produce, and it
+    // is the one failure mode no timeout in the suite would have explained.
+    const src = path.join(tmp, "fifosrc");
+    fs.mkdirSync(path.join(src, "hooks"), { recursive: true });
+    spawnSync("mkfifo", [path.join(src, "hooks/review-loop.sh")]);
+    // ASSERT THE FIXTURE. mkfifo's result was unchecked and Node has no fs.mkfifo,
+    // so if it were missing the file would simply be ABSENT — and setup emits
+    // byte-identical output for that, passing all three assertions with no FIFO
+    // anywhere. A test that cannot tell its own fixture apart from its absence.
+    expect(fs.lstatSync(path.join(src, "hooks/review-loop.sh")).isFIFO(),
+      "fixture did not create a FIFO").toBe(true);
+    fs.copyFileSync(path.resolve(__dirname, "../hooks/review-loop-shim.sh"),
+                    path.join(src, "hooks/review-loop-shim.sh"));
+    const res = spawnSync("bash", [SETUP], {
+      cwd: repo, encoding: "utf8", timeout: 15000, killSignal: "SIGKILL",
+      env: { ...process.env, REVIEW_LOOP_IMPL: impl, REVIEW_LOOP_SRC: src },
+    });
+    expect(res.signal, "must not have hung").toBeNull();
+    expect(res.status, "must refuse").not.toBe(0);
+    expect(res.stderr, "must name the file it cannot use").toMatch(/cannot find hooks\/review-loop\.sh/);
+  });
+
+  it("finds its own source tree when the checkout path needs escaping", () => {
+    // The derived-SRC branch never runs anywhere else in the suite: every fixture
+    // sets REVIEW_LOOP_SRC, so reverting fileURLToPath to `new URL(...).pathname`
+    // killed NOTHING. `.pathname` is percent-encoded, so a checkout at
+    // "/tmp/my checkout" became ".../my%20checkout" and setup refused outright.
+    const spaced = path.join(tmp, "my checkout");
+    fs.mkdirSync(spaced, { recursive: true });
+    for (const f of ["setup", "hooks", "lib"]) {
+      fs.cpSync(path.resolve(__dirname, "..", f), path.join(spaced, f), { recursive: true });
+    }
+    fs.chmodSync(path.join(spaced, "setup"), 0o755);
+    const env: Record<string, string> = { ...process.env as Record<string, string>, REVIEW_LOOP_IMPL: impl };
+    delete env.REVIEW_LOOP_SRC;          // the whole point: let it derive its own
+    // AND the swap point, or a lib-mutation run overrides the copied wrapper's own
+    // resolution and this test fails for a reason unrelated to the mutant — an
+    // inflated kill set, which reads as better news than the truth.
+    // CONSEQUENCE, stated so nobody reads it as a coverage gap: this test copies
+    // lib/ from the REAL repo, so it can never observe a REVIEW_LOOP_SETUP_LIB
+    // mutant. A SURVIVED there is honest. To pin fileURLToPath, mutate
+    // lib/setup.mjs IN PLACE — verified: the `.pathname` revert dies here, and
+    // only here.
+    delete env.REVIEW_LOOP_SETUP_LIB;
+    delete env.CLAUDECODE;               // run() strips these deliberately; so must this
+    delete env.CLAUDE_CODE_SESSION_ID;
+    const res = spawnSync("bash", [path.join(spaced, "setup")], {
+      cwd: repo, encoding: "utf8", timeout: 20000, env,
+    });
+    expect(res.status, `a path with a space must still install: ${res.stderr}`).toBe(0);
+    expect(res.stdout, "and must report the real path, not a percent-encoded one")
+      .toContain("my checkout");
+  });
+
+  it("still refreshes the machine copy on a no-op run with a foreign literal", () => {
+    // IS_NOOP gates the number-literal refusal, and without it a plain re-run of a
+    // repo holding e.g. "1.50" would REFUSE instead of refreshing $IMPL — which is
+    // the reason people re-run setup at all. Mutating `!IS_NOOP` away killed
+    // nothing, so the hoist that fixed the P1 was itself unpinned.
+    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+    fs.writeFileSync(settingsPath(), '{ "hooks": {}, "foreignTool": { "v": 1.5 } }');
+    expect(run().status, "first install").toBe(0);
+    const j = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
+    j.foreignTool.v = 1.50;                            // now un-round-trippable, by hand
+    fs.writeFileSync(settingsPath(), JSON.stringify(j, null, 2).replace('"v": 1.5', '"v": 1.50'));
+    fs.rmSync(impl, { force: true });
+
+    const res = run();
+    expect(res.status, `a no-op re-run must still refresh: ${res.stderr}`).toBe(0);
+    expect(res.stdout).toMatch(/already up to date/);
+    expect(fs.existsSync(impl), "the machine copy must be back").toBe(true);
+  });
+
   it("keeps the pathspec when another assignment precedes it", () => {
     // The carry-forward only matched a prefix STARTING with REVIEW_LOOP_PATHS=,
     // so any assignment ahead of it — a state dir, an env wrapper — dropped BOTH
@@ -994,16 +1178,22 @@ describe("setup — activation, the thing that made it look broken", () => {
     expect(res.stderr, "the failing path must appear in the message").toContain(gone);
   });
 
-  it("shows jq's own diagnosis when the merge fails, prefixed", () => {
-    // Deleting the entire re-run-and-prefix block survived all 36 tests: the
-    // existing assertion checks only that no BARE jq: line appears, which an
-    // absent diagnosis satisfies. The point of the fix is unasserted without this.
+  it("a merge failure names its own cause, prefixed", () => {
+    // REPLACES `shows jq's own diagnosis when the merge fails, prefixed`, which
+    // was named in the port plan BEFORE any code was written as the one test that
+    // could not survive unmodified: it asserted `/setup: jq: /`, and the port has
+    // no jq to quote. Making it emit that string would be a lie. The PROPERTY it
+    // was protecting survives verbatim — the user learns why, from us, prefixed,
+    // and never as bare parser output.
     fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
     fs.writeFileSync(settingsPath(), "[]");
     const res = run();
-    expect(res.status).not.toBe(0);
-    expect(res.stderr, "jq's cause must reach the user").toMatch(/setup: jq: .+/);
-    expect(res.stderr, "and never unprefixed").not.toMatch(/^jq:/m);
+    expect(res.status, "an unmergeable settings.json must refuse").not.toBe(0);
+    expect(res.stderr, "the cause must reach the user").toMatch(/setup:.+/);
+    expect(res.stderr, "and must say what could not be done")
+      .toMatch(/failed to build the merged settings/);
+    expect(res.stderr, "never bare parser output").not.toMatch(/^(jq|SyntaxError|node):/m);
+    expect(fs.existsSync(impl), "and nothing outside the repo may be touched").toBe(false);
   });
 
   it("names itself when an install fails, rather than leaking install(1)", () => {

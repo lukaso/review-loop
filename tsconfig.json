@@ -1,0 +1,19 @@
+{
+  "//": "STATIC ANALYSIS INSTEAD OF TESTS. lib/setup.mjs is plain JS so a fresh clone can run it with no build step and no node_modules — but plain JS is exactly where a typo becomes a runtime failure in a tool whose defining bug is silence. checkJs gives it type checking without a build.",
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2022"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true
+  },
+  "include": ["lib/**/*.mjs", "test/**/*.ts"]
+}

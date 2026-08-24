@@ -1,0 +1,486 @@
+#!/usr/bin/env bash
+# review-loop setup — installs the STANDARD into a repo and the IMPLEMENTATION
+# onto this machine.
+#
+#   ~/.claude/hooks/review-loop.sh        the real hook   (machine, one copy)
+#   <repo>/.claude/hooks/review-loop.sh   the shim        (committed)
+#   <repo>/.claude/settings.json          3 registrations (committed)
+#
+# Why split: the registration and this repo's REVIEW_LOOP_PATHS are a repo
+# standard and belong in the repo; the 500 lines that implement it are a machine
+# concern, and committing those would make every upstream fix a commit in every
+# consuming repo.
+#
+# settings.json IS A CONTESTED FILE — other tools register hooks there, and one of
+# them commits the whole index with no pathspec. Rules, in order of importance:
+#   1. merge, never replace; preserve every item we did not write
+#   2. refuse a file we cannot parse — never "repair" it
+#   3. back up before the first mutation
+#   4. never `git add`, never commit
+#   5. hold a lock: setup runs on EVERY update, so a lost update is not rare
+set -u
+
+# REVIEW_LOOP_SRC lets a COPY of this script find the real source tree. Without
+# it, `cp setup /tmp/m && /tmp/m` resolves $SRC to /tmp, finds no hooks/ there, and
+# dies at `install:` — so every mutation run against such a copy reports a full
+# suite of kills it never earned. A false KILLED reads as better news than the
+# truth, which makes it worse than a false SURVIVED.
+# `CDPATH= cd --`, checked, physical. Three separate traps in one line:
+#   CDPATH  — cd ECHOES the directory when it resolves via CDPATH, and command
+#             substitution concatenates that with pwd, so the value becomes two
+#             lines. Measured: the shim and settings.json landed in a DIFFERENT
+#             repo while the named one stayed empty, and setup exited 0 saying
+#             "installed."
+#   ||exit  — unchecked, a failed cd leaves the value EMPTY and everything below
+#             operates on `/`. `[ -d ]` passes for a directory with no +x.
+#   --      — a target beginning with a dash is otherwise read as a cd option.
+# The `CDPATH=` here is DOMINATED by the source guard below and cannot be caught
+# by the suite — kept anyway, and said out loud rather than tested vacuously. The
+# hazard is real (`bash rl/setup` from a parent with a matching CDPATH entry
+# resolved $SRC to a different checkout, as two concatenated lines); the guard
+# turns that into a clean refusal, so removing this only degrades the message.
+SRC=${REVIEW_LOOP_SRC:-$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)}
+TARGET=$PWD
+PATHS=""
+PATHS_GIVEN=0   # "--paths ''" means CLEAR it; absent means CARRY IT FORWARD. Same
+                # empty string, opposite intent — collapsing them made an explicit
+                # clear restore the old pathspec and report "no change".
+TIMEOUT=10
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) [ $# -ge 2 ] || { echo "setup: --target needs a directory" >&2; exit 2; }
+              TARGET=$2; shift 2 ;;
+    --paths)  [ $# -ge 2 ] || { echo "setup: --paths needs a pathspec string" >&2; exit 2; }
+              PATHS=$2; PATHS_GIVEN=1; shift 2 ;;
+    -h|--help)
+      cat <<'USAGE'
+review-loop setup — install the review nudge into a repo.
+
+Usage: ./setup [--target <repo>] [--paths "<git pathspecs>"]
+
+  --target <repo>   repo to install into (default: current directory)
+  --paths "<spec>"  REVIEW_LOOP_PATHS for this repo, e.g.
+                    ". :(exclude)prototypes/ :(exclude)notes.md"
+                    Applied identically to all three registrations.
+
+Installs the implementation to $REVIEW_LOOP_IMPL (default
+~/.claude/hooks/review-loop.sh) and commits nothing.
+USAGE
+      exit 0 ;;
+    *) echo "setup: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+for _bin in jq cat cp mkdir install rmdir sed; do
+  command -v "$_bin" >/dev/null 2>&1 || { echo "setup: missing required tool: $_bin" >&2; exit 2; }
+done
+
+# BOTH files, and BEFORE any install runs. Checking only the hook left the shim to
+# be reported by install(1) — no `setup:` prefix, no mention of REVIEW_LOOP_SRC —
+# and by then $IMPL had ALREADY been overwritten. $IMPL is the single copy every
+# shimmed repo on this machine executes, so a wrong $SRC downgraded all of them on
+# its way to failing.
+for _f in hooks/review-loop.sh hooks/review-loop-shim.sh; do
+  [ -f "$SRC/$_f" ] || {
+    echo "setup: cannot find $_f under $SRC" >&2
+    echo "setup: if this is a copy of the script, set REVIEW_LOOP_SRC to the repo root." >&2
+    exit 2
+  }
+done
+# NO `[ -d ]` PRE-CHECK. It was deleted, not forgotten: `cd` succeeds only on
+# directories, so everything the check rejected the `cd` below rejects too, and
+# mutation proved it could not change any outcome — the third guard removed here
+# on that basis, after `git rev-parse --git-dir` and `[ -f "$TRANSCRIPT" ]`.
+TARGET_ARG=$TARGET
+TARGET=$(CDPATH= cd -- "$TARGET_ARG" 2>/dev/null && pwd -P) || {
+  echo "setup: cannot enter $TARGET_ARG" >&2; exit 2
+}
+
+IMPL=${REVIEW_LOOP_IMPL:-${HOME:-}/.claude/hooks/review-loop.sh}
+[ -n "${IMPL#/.claude/hooks/review-loop.sh}" ] || { echo "setup: no HOME and no REVIEW_LOOP_IMPL" >&2; exit 2; }
+
+
+# ── Say the one thing that decides whether any of this runs ──────────────────
+# Claude Code reads settings.json at STARTUP. An install performed mid-session
+# registers nothing that will fire, and this script used to print "installed."
+# and exit 0 — so the user got zero nudges for the rest of their session and had
+# no way to tell that from a broken tool. That happened, on this repo: installed,
+# declared working, had not fired once. Silence that looks like health is exactly
+# the failure this project exists to prevent, and setup was committing it about
+# itself.
+#
+# LAST LINE, deliberately. Above the file list it is not read.
+# CLAUDECODE is set for anything a session spawns, so when it is set we know the
+# session reading this output is the one that will NOT honour the install.
+# SHELL-QUOTE, do not interpolate. The registered command is a shell string, and a
+# pathspec containing a double quote produced one that mangles its own value or
+# does not parse at all — a settings.json that looks installed, never fires, and is
+# committed for everyone who clones. Single-quote with the standard '\'' escape,
+# which is safe for every byte except NUL.
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# WHAT THIS CANNOT KNOW, and therefore must not claim: which project the calling
+# session is in. `CLAUDE_PROJECT_DIR` is not exported into a spawned shell, so the
+# only proxy is $PWD — and comparing it to $TARGET was wrong three ways. The worst:
+# `cd /B && setup` from a session whose project is /A matches, so it said "restart
+# THIS session", and `claude --continue` reopens /A, whose settings were never
+# touched. Told the install is active, gets silence — the exact failure this notice
+# was added to prevent, produced by the notice.
+#
+# So: NAME THE DIRECTORY, give the commands, and let the reader match it against
+# where they are. True in every context, including the ones we cannot detect.
+#
+# $1 is "fresh" (settings.json changed) or "noop". Note "fresh" does NOT mean
+# "never installed" — re-running with new --paths from a session where the hook is
+# already firing takes this path, and saying "nothing will fire" there is false.
+# Both wordings hedge; only the emphasis differs.
+say_activation() {
+  echo
+  if [ "${1:-fresh}" = "noop" ]; then
+    echo "setup: If you installed DURING the current session,"
+    echo "setup: Claude Code read its hooks at startup and does not have them yet —"
+    echo "setup: if you have restarted since, it is already live and there is"
+    echo "setup: nothing to do."
+  else
+    echo "setup: registered in $TARGET. Claude Code reads hooks at startup, so a"
+    echo "setup: session already running does not have this registration yet."
+  fi
+  echo
+  if [ -n "${CLAUDECODE:-}" ]; then
+    echo "    to pick it up in $(shq "$TARGET"), exit and run:"
+    echo "        claude --continue     # keeps the same conversation"
+    echo "        claude --resume       # pick a different session"
+  else
+    echo "    cd $(shq "$TARGET") && claude"
+  fi
+  echo
+}
+
+# The directory only — no files yet. The lock lives inside it, so it must exist
+# before we can take one; the INSTALLS stay below every refusal path.
+
+SETTINGS="$TARGET/.claude/settings.json"
+
+# EVERY DESTINATION WE WRITE, checked with ONE predicate, BEFORE the lock, the
+# backup and both installs — so a refusal changes nothing anywhere.
+#
+# `mv -f` and `install(1)` share a behaviour: if the destination is a DIRECTORY
+# they put the file INSIDE it and return 0. Measured at all three destinations:
+#   settings.json  -> "installed.", exit 0, a settings.json Claude Code cannot read
+#   the shim       -> "installed.", exit 0, COMMITTED, every turn then exits 126
+#                     leaking bare stderr — and on UserPromptSubmit that lands in
+#                     the user's face mid-sentence
+#   $IMPL          -> same, and `[ -x ]` is TRUE for a searchable directory, so the
+#                     v0.2.1 shim guard does not catch it either
+# The symlink-to-a-directory variant of the shim case wrote OUTSIDE $TARGET.
+#
+# The first version of this guard covered settings.json ALONE. The two siblings
+# were not looked for — one predicate, fixed at one of three call sites, is how a
+# whole class survives a fix that was written for it.
+#
+# `-f` follows symlinks on purpose: a symlink to a REGULAR FILE still installs; a
+# symlink to a DIRECTORY is the hazard above. Measured, because the obvious reading
+# is wrong: `install(1)` and `mv -f` REPLACE the symlink with a regular file rather
+# than writing through it, so the target outside stays untouched — nothing escapes
+# $TARGET, but the user's indirection is severed rather than honoured.
+regular_or_absent() {
+  [ ! -e "$1" ] || [ -f "$1" ] || {
+    echo "setup: $1 exists and is not a regular file; nothing was changed." >&2
+    exit 2
+  }
+}
+SHIM_DEST="$TARGET/.claude/hooks/review-loop.sh"
+# Resolve $IMPL's directory when it exists so /var vs /private/var cannot hide a
+# ONE resolver, used for BOTH operands. Resolving only $IMPL and comparing it
+# against a raw "$TARGET/.claude/hooks" meant a symlinked .claude/hooks — the
+# ordinary "share one hooks dir across repos" dotfiles pattern — walked straight
+# past the check: the shim was installed OVER the machine-global implementation
+# that EVERY shimmed repo on this machine executes, and then exec'd itself to the
+# registration timeout. Exit 0, "installed.", committed for everyone who clones.
+# A comparison has two sides; resolving one of them is not resolving it.
+resolve_dir() {   # physical path, or nothing (rc 1) when it cannot be resolved
+  # FOLLOW SYMLINKS EXPLICITLY. The first version walked up while `! -d` and
+  # re-appended each missing component by NAME — which silently mis-resolves a
+  # DANGLING symlink, because a dangling link is not a directory either. That is
+  # the fresh-clone state of the "share one hooks dir" pattern: the symlink is
+  # committed, its target has not been created yet. The comparison then read
+  # unequal, the $IMPL install CREATED the target, which made the link live, and
+  # the shim install wrote straight through it onto $IMPL.
+  # Resolving the EXISTING state and not the dangling one is the same half-applied
+  # rule as resolving one operand of two.
+  _d=$1; _rest=""; _n=0
+  while [ -n "$_d" ] && [ "$_d" != "/" ] && [ "$_d" != "." ]; do
+    _n=$((_n + 1))
+    [ "$_n" -le 64 ] || return 1                 # symlink loop
+    if [ -L "$_d" ]; then
+      _t=$(readlink "$_d" 2>/dev/null) || return 1
+      # NOT unreachable — deleting this cited "an empty symlink target is not
+      # creatable", which is false. `ln -s $'\n' x` is creatable, readlink exits 0,
+      # and command substitution strips the newline to "".
+      # WHAT IT COSTS, measured on the mutant rather than guessed: the walk returns
+      # the symlink's own PARENT, the two paths compare UNEQUAL so the collision
+      # branch is never reached, and setup gets as far as overwriting $IMPL — the
+      # machine-global copy every shimmed repo on this box execs — before failing
+      # with `could not install the shim into …`. That is a write OUTSIDE $TARGET,
+      # the highest bar this project has. An earlier version of this comment billed
+      # it as a merely confusing message, which is how a guard gets deleted twice.
+      [ -n "$_t" ] || return 1
+      case "$_t" in
+        /*) _d=$_t ;;
+        *)  _d=$(dirname "$_d")/$_t ;;
+      esac
+      continue
+    fi
+    [ -d "$_d" ] && break
+    _rest="/$(basename "$_d")$_rest"
+    _d=$(dirname "$_d")
+  done
+  _p=$(CDPATH= cd -- "$_d" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s' "$_p" "$_rest"
+}
+# Compare the FULL paths, basename included. Comparing directories alone refused a
+# machine copy deliberately placed beside the shim, claiming two demonstrably
+# different files "resolve to the same file".
+# ONE SUBSTITUTION PER GUARDED ASSIGNMENT. An assignment-only command exits with
+# the status of the LAST command substitution it performed, so appending
+# `/$(basename …)` — which always succeeds — DISCARDED resolve_dir's `return 1`
+# and left the refusal below unreachable. The shim line, with nothing after its
+# substitution, worked. The same guard one line apart: one was code, one was not.
+# Resolve first, append second.
+_impl_dir=$(resolve_dir "$(dirname "$IMPL")") || {
+  echo "setup: cannot resolve $IMPL (a broken symlink?). Nothing was changed." >&2; exit 2; }
+_shim_dir=$(resolve_dir "$TARGET/.claude/hooks") || {
+  echo "setup: cannot resolve $SHIM_DEST (a broken symlink?). Nothing was changed." >&2; exit 2; }
+IMPL_RESOLVED="$_impl_dir/$(basename "$IMPL")"
+SHIM_RESOLVED="$_shim_dir/review-loop.sh"
+
+regular_or_absent "$SETTINGS"
+regular_or_absent "$IMPL"
+regular_or_absent "$SHIM_DEST"
+
+# $IMPL AND THE SHIM CAN BE THE SAME FILE — with $TARGET == $HOME they are, and a
+# symlinked .claude/hooks gets there too. Both guards pass (one regular file), the
+# implementation is installed, then the shim is installed OVER it. The shim
+# becomes its own $IMPL, `[ -x ]` is true because it IS itself, and it execs
+# itself until the turn times out: a committed settings.json and a committed shim,
+# exit 0, "installed.", three events that can never fire. Measured to depth 6
+# before a counter stopped it, and to a 124 timeout without one.
+if [ "$IMPL_RESOLVED" = "$SHIM_RESOLVED" ]; then
+  echo "setup: the machine copy and the committed shim resolve to the same file:" >&2
+  echo "setup:   $IMPL" >&2
+  echo "setup:   $SHIM_DEST" >&2
+  echo "setup: they must differ, or the shim runs itself. Nothing was changed." >&2
+  exit 2
+fi
+
+mkdir -p "$TARGET/.claude" 2>/dev/null \
+  || { echo "setup: could not create $TARGET/.claude" >&2; exit 2; }
+LOCK="$SETTINGS.lock"
+
+# ── 3. the lock ──────────────────────────────────────────────────────────────
+# `mkdir` is the primitive: it is atomic on every POSIX filesystem, unlike
+# test-then-create. A stale lock is taken over after 30s so a killed run cannot
+# block this repo forever; a FRESH lock is a hard failure, NOT a skip. gstack
+# skips and warns because its system is convergent — ours is not, and a skipped
+# install that exits 0 leaves the user believing the hook is registered.
+lock_age() {
+  if stat -c %Y "$LOCK" >/dev/null 2>&1; then echo $(( $(date +%s) - $(stat -c %Y "$LOCK") ))
+  elif stat -f %m "$LOCK" >/dev/null 2>&1; then echo $(( $(date +%s) - $(stat -f %m "$LOCK") ))
+  else echo 0; fi
+}
+if ! mkdir "$LOCK" 2>/dev/null; then
+  AGE=$(lock_age)
+  if [ "$AGE" -gt 30 ]; then
+    rm -rf "$LOCK" 2>/dev/null || true
+    mkdir "$LOCK" 2>/dev/null || { echo "setup: could not take over the stale lock at $LOCK" >&2; exit 3; }
+    echo "setup: took over a stale lock (${AGE}s old)"
+  else
+    echo "setup: settings.json is locked by another run (${AGE}s old): $LOCK" >&2
+    echo "setup: nothing was changed. Retry, or remove that directory if no setup is running." >&2
+    exit 3
+  fi
+fi
+# Released on EVERY exit path, including the error ones below. Without this a
+# refusal to parse would leave a lock that blocks the next run for 30s.
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+# ── 4. read, refusing what we cannot parse ───────────────────────────────────
+if [ -f "$SETTINGS" ]; then
+  CURRENT=$(jq '.' "$SETTINGS" 2>/dev/null) || {
+    echo "setup: cannot parse $SETTINGS — refusing to touch it." >&2
+    echo "setup: fix the JSON (or move it aside) and re-run. Nothing was changed." >&2
+    exit 4
+  }
+else
+  CURRENT='{}'
+fi
+
+CMD="\"\$CLAUDE_PROJECT_DIR/.claude/hooks/review-loop.sh\""
+
+# ── the env prefix a re-run must not silently discard ─────────────────────────
+# A committed command is `<assignments> <tail>`, and the assignments ARE the
+# repo's standard: REVIEW_LOOP_PATHS, plus any REVIEW_LOOP_PLANS_DIR or
+# REVIEW_LOOP_STATE_DIR beside it. Three consecutive rounds each dropped some of
+# them and printed "installed." anyway:
+#   1. rebuilding from an empty $PATHS dropped the pathspec on a plain re-run
+#   2. anchoring the match at the start dropped BOTH when another assignment led
+#   3. fixing only the no---paths branch left `--paths` — the invocation README
+#      documents — still discarding everything else, on all three events
+# Extracted ONCE, above the branches, because the recurring defect was never the
+# rule: it was having more than one place to apply it.
+EXISTING=$(printf '%s' "$CURRENT" | jq -r '
+  [ .hooks[]?[]?.hooks[]? | select((.command // "") | test("review-loop\\.sh")) | .command ] as $c
+  # Prefer a registration that HAS a prefix. Plain `first` took whichever command
+  # came first in FILE order, so one bare or legacy event discarded the prefix the
+  # other two carried.
+  | ($c | map(select(test("^[A-Za-z_][A-Za-z0-9_]*="))) | first) // ($c | first) // ""
+  ' 2>/dev/null) || EXISTING=""
+
+PREFIX=${EXISTING%"$CMD"}
+[ "$PREFIX" = "$EXISTING" ] && PREFIX=""   # tail did not match => legacy form, rebuild
+# A stripped prefix is only an ENV PREFIX if it CONTAINS an assignment. A legacy
+# `OLD <tail>` also ends in today's tail, so `%` left "OLD " behind and it got
+# carried forward — pinning exactly the stale form this branch exists to rebuild.
+# Judging by the FIRST WORD instead cannot tell `env` from `OLD`, and regressed
+# two forms the previous code carried: `env VAR=x ` and a leading space. The test
+# is the whole prefix.
+case "$PREFIX" in *=*) : ;; *) PREFIX="" ;; esac
+
+# We always emit REVIEW_LOOP_PATHS last, so whatever sits AHEAD of it is somebody
+# else's and must survive every branch below.
+CARRIED=${PREFIX%%REVIEW_LOOP_PATHS=*}
+HAD_PATHS=0
+[ "$CARRIED" = "$PREFIX" ] || HAD_PATHS=1
+# `%%` is an unanchored SUBSTRING match, so MY_REVIEW_LOOP_PATHS= split mid-token
+# and the summary announced replacing a variable that was never set. A real
+# assignment starts the prefix or follows a space; anything else was a longer name.
+case "$CARRIED" in
+  ""|*" ") : ;;
+  *) CARRIED=$PREFIX; HAD_PATHS=0 ;;
+esac
+
+# CARRIED keeps only what PRECEDES the pathspec, because finding where a shell
+# quoted value ENDS is not something parameter expansion can do. So an assignment
+# written AFTER it was deleted from all three registrations with nothing said —
+# and losing REVIEW_LOOP_PLANS_DIR silences the plan trigger while the git trigger
+# keeps firing and masks it. REFUSE instead of guessing: a wrong ask costs a line,
+# a wrong silence loses the work.
+if [ "$HAD_PATHS" = 1 ] && [ "$PATHS_GIVEN" = 1 ]; then
+  case "${PREFIX#*REVIEW_LOOP_PATHS=}" in
+    *[[:space:]][A-Za-z_]*=*)
+      echo "setup: the registered command has an assignment AFTER REVIEW_LOOP_PATHS:" >&2
+      echo "setup:   $PREFIX" >&2
+      echo "setup: rewriting the pathspec would delete it. Re-run without --paths," >&2
+      echo "setup: or move that assignment ahead of REVIEW_LOOP_PATHS. Nothing was changed." >&2
+      exit 2 ;;
+  esac
+fi
+
+if [ -n "$PATHS" ]; then
+  CMD="${CARRIED}REVIEW_LOOP_PATHS=$(shq "$PATHS") $CMD"
+  [ "$HAD_PATHS" = 0 ] || echo "setup: replaced the REVIEW_LOOP_PATHS already registered."
+elif [ "$PATHS_GIVEN" = 1 ]; then
+  CMD="${CARRIED}$CMD"                     # --paths '' means CLEAR, not "unspecified"
+  [ "$HAD_PATHS" = 0 ] || echo "setup: cleared the REVIEW_LOOP_PATHS already registered."
+else
+  CMD="${PREFIX}$CMD"                      # nothing said => keep what is committed
+fi
+
+# ── 5. merge ─────────────────────────────────────────────────────────────────
+# Identity is INTRINSIC — an item is ours iff its command names review-loop.sh.
+# Not a tag we write: Claude Code strips unknown keys when it rewrites this file,
+# so a marker would silently vanish and we would duplicate on the next run.
+#
+# `strip_ours` removes our ITEMS, not their groups: a group we share with a
+# foreign hook keeps the foreign hook and loses only us. Dropping whole groups
+# would delete somebody else's gate, which is the worst thing this script could do.
+# The merge program, held once so the failure path can re-run it verbatim to show
+# jq's own diagnosis. Swallowing that stderr left "failed to build the merged
+# settings" as the user's ONLY information — a jq built without oniguruma fails
+# test() and there is nothing to act on. Routing it through a /tmp file instead
+# was worse: a predictable name outside $TARGET is the same class of bug as the
+# CDPATH one, and this script must not write outside the target and $IMPL.
+MERGE_JQ='
+  def strip_ours:
+    map(.hooks = ((.hooks // []) | map(select((.command // "") | test("review-loop\\.sh") | not))))
+    | map(select((.hooks // []) | length > 0));
+  def ensure($ev):
+    .hooks[$ev] = ((.hooks[$ev] // []) | strip_ours)
+                + [{ hooks: [{ type: "command", command: $cmd, timeout: $timeout }] }];
+  (.hooks //= {})
+  | ensure("SessionStart") | ensure("UserPromptSubmit") | ensure("Stop")
+'
+UPDATED=$(printf '%s' "$CURRENT" | jq --arg cmd "$CMD" --argjson timeout "$TIMEOUT" "$MERGE_JQ" 2>/dev/null) || {
+  # Second run, failure path only: prefix every line so nothing reaches the user
+  # as a bare `jq:` — a hook that leaks unprefixed stderr breaks the turn, and
+  # this script is held to the same standard it installs.
+  printf '%s' "$CURRENT" | jq --arg cmd "$CMD" --argjson timeout "$TIMEOUT" "$MERGE_JQ" 2>&1 >/dev/null \
+    | sed 's/^/setup: jq: /' >&2
+  echo "setup: failed to build the merged settings; nothing was changed." >&2
+  exit 5
+}
+
+# ── Install the files, now that nothing can refuse ───────────────────────────
+# DELIBERATELY AFTER the lock, the parse AND the merge. Both of those refuse with "nothing
+# was changed" — and when the installs ran first, that sentence was false: $IMPL
+# (the machine-global copy every shimmed repo executes) and the repo's committed
+# shim had both already been replaced. A stale REVIEW_LOOP_SRC therefore
+# downgraded the machine copy on any run that then hit a held lock or an
+# unparseable settings.json, while the message said it had not. The merge joined
+# them in round 7: `jq .` accepts any valid JSON, but the merge indexes it as an
+# object, so a top-level array parses and then fails — and that refusal ran after
+# the installs too.
+#
+# These DO run on the no-op path, deliberately: updating $IMPL is why anyone
+# re-runs setup. What was wrong there was the message, not the install.
+{ mkdir -p "$(dirname "$IMPL")" && install -m 755 "$SRC/hooks/review-loop.sh" "$IMPL"; } 2>/dev/null \
+  || { echo "setup: could not install the implementation to $IMPL" >&2; exit 2; }
+{ mkdir -p "$TARGET/.claude/hooks" && install -m 755 "$SRC/hooks/review-loop-shim.sh" "$TARGET/.claude/hooks/review-loop.sh"; } 2>/dev/null \
+  || { echo "setup: could not install the shim into $TARGET/.claude/hooks" >&2; exit 2; }
+
+# ── 6. write only if it actually changed ─────────────────────────────────────
+# Compared canonically, so re-running setup is a TRUE no-op: no rewrite, no
+# pointless backup, and no diff for the user to wonder about.
+if [ "$(printf '%s' "$CURRENT" | jq -S -c '.')" = "$(printf '%s' "$UPDATED" | jq -S -c '.')" ]; then
+  echo "setup: registrations already up to date — no change to settings.json."
+  echo "  source:         $SRC"
+  echo "  implementation: $IMPL  (refreshed)"
+  echo "  shim:           $TARGET/.claude/hooks/review-loop.sh  (refreshed)"
+  say_activation noop
+  exit 0
+fi
+
+if [ -f "$SETTINGS" ]; then
+  BAK="$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
+  # UNREACHABLE through the suite, like the two below and for the same reason:
+  # an unreadable settings.json fails `jq` far above here, so the parse refuses
+  # first. Kept for the real-world cases (a full disk, a read-only mount).
+  cp "$SETTINGS" "$BAK" 2>/dev/null || { echo "setup: could not back up $SETTINGS; nothing was changed." >&2; exit 5; }
+  echo "setup: backed up $SETTINGS -> $(basename "$BAK")"
+fi
+
+TMP="$SETTINGS.tmp.$$"
+# Same bare-stderr class the install messages closed: `mv:` reporting itself with
+# no `setup:` prefix was the ONLY thing an immutable settings.json produced, after
+# a backup had already been left in the repo.
+# BOTH messages are UNREACHABLE through the suite, and that is stated rather than
+# faked: a read-only .claude fails at `mkdir "$LOCK"` long before here, and the
+# only ways left — an immutable flag, a read-only mount, a permission change
+# racing between the write and the rename — are not portably constructible. Kept
+# anyway: they are reachable in the real world, and deleting them restores a bare
+# `mv:` line as the user's only output. Not a guard that cannot fail; a guard this
+# harness cannot reach.
+printf '%s\n' "$UPDATED" > "$TMP" 2>/dev/null || { rm -f "$TMP"; echo "setup: could not write $TMP" >&2; exit 5; }
+mv -f "$TMP" "$SETTINGS" 2>/dev/null || {
+  rm -f "$TMP"; echo "setup: could not replace $SETTINGS (a backup is beside it)" >&2; exit 5
+}
+
+echo "setup: installed."
+echo "  source:         $SRC"
+echo "  implementation: $IMPL"
+echo "  shim:           $TARGET/.claude/hooks/review-loop.sh"
+echo "  registered:     SessionStart, UserPromptSubmit, Stop"
+echo "setup: nothing was staged or committed — commit .claude/ yourself when ready."
+say_activation
+exit 0

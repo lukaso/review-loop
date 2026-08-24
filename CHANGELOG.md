@@ -4,6 +4,45 @@ Shape borrowed from gstack: a bolded headline sentence, then what actually
 happened, then the numbers that back it. Every claim here is a measurement — if a
 number cannot be reproduced it is deleted rather than repeated.
 
+## [Unreleased] — `setup` ported to Node
+
+**All five bar-clearing defects in v0.2.2 were `setup`'s path handling.** Measured
+across that release: `setup` took +356/-20 lines and every one of the five; the
+hook took +6 (a comment) and none. It was never bash that was fragile — it was
+what `setup` did in bash: path resolution, symlink following, install
+destinations, and string surgery on shell command strings.
+
+`setup` is now a ~90-line bash wrapper that finds node and execs `lib/setup.mjs`.
+The wrapper stays bash deliberately: node comes from nvm on the machine this was
+written on, is missing under a bare PATH, and `claude` is a native binary that
+does not provide it — so `#!/usr/bin/env node` would fail with `env: node: No
+such file or directory`, no prefix and no instructions. Node problems exit **6**,
+its own code, because 2/3/4/5 are refusal, lock, parse and write.
+
+**What the port actually bought, honestly:** it DELETES the CDPATH class and the
+hand-rolled symlink walk; it RELOCATES one-rule-N-call-sites into JSON
+type-guarding; and it INTRODUCED two silent-success primitives bash did not have
+— `copyFileSync` truncates in place where `install(1)` renames, and `existsSync`
+swallows EACCES. Both are guarded, and the guards are the reason invariants 9 and
+10 are now written down.
+
+**`settings.json` is verified, not trusted.** `JSON.parse`/`stringify`
+canonicalises number literals (`1.50`→`1.5`, integers above 2^53 lose precision)
+and reorders integer-like keys, where jq preserved both. In a committed, contested
+file whose first rule is *preserve every item we did not write*, that would appear
+in the user's `git diff` as our change. Rather than hand-roll a literal-preserving
+parser, setup now REFUSES when a rewrite would alter anything it did not write.
+
+Also: `jq`, `cat`, `cp`, `mkdir`, `install`, `rmdir` and `sed` are gone from the
+preflight kill switch; `lib/` is in `files[]` and asserted by the release test;
+and `npm test` now runs `tsc --strict --checkJs` over `lib/` and `test/` first —
+which immediately found that `die()` was not typed `never`, so nothing could
+prove the guards above every use actually stopped execution.
+
+232 tests (99 hook, 83 setup, 28 differential, 9 shim, 4 wrapper, 9 release). The
+28 differential tests compare bash against Node on stdout, stderr, exit code and
+filesystem state; they are temporary and retire with `.baseline/setup-bash`.
+
 ## [0.2.2] - 2026-08-23
 
 **`setup` said "installed." and then nothing fired, for the rest of your session.**

@@ -46,7 +46,7 @@ describe("licence — the claim must be backed by a file", () => {
     // `files` gates what npm publishes. The shim and LICENSE are part of the
     // product now, so leaving them out ships a package that cannot install.
     const files: string[] = pkg().files;
-    for (const needed of ["hooks/", "README.md", "LICENSE"]) {
+    for (const needed of ["hooks/", "lib/", "setup", "README.md", "LICENSE"]) {
       expect(files, `package.json files[] omits ${needed}`).toContain(needed);
     }
   });

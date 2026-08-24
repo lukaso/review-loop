@@ -103,6 +103,30 @@ detail. Do not inline rules into it.
   REVIEW_LOOP_HOOK=/tmp/m.sh npx vitest run
   ```
 
+  **`setup` NEEDS A `lib/` BESIDE IT, and a bare `/tmp` copy is a 75-test false
+  KILLED.**
+  Since the port, `setup` is a wrapper and the logic is in `lib/setup.mjs`, which
+  the wrapper resolves from its OWN directory. So a copy in `/tmp` finds no `lib/`
+  and every test fails for a reason unrelated to the mutation:
+
+  ```bash
+  # mutating the IMPLEMENTATION — the usual case:
+  cp lib/setup.mjs /tmp/m.mjs && REVIEW_LOOP_SETUP_LIB=/tmp/m.mjs npx vitest run
+
+  # mutating the WRAPPER — give the copy a lib/ rather than an env var:
+  mkdir /tmp/mw && cp setup /tmp/mw/setup && ln -s "$PWD/lib" /tmp/mw/lib
+  REVIEW_LOOP_SETUP=/tmp/mw/setup npx vitest run        # 232/232 unmutated
+  ```
+
+  The env-var form was tried and REJECTED: setting `REVIEW_LOOP_SETUP_LIB` for a
+  wrapper mutation leaks into tests that must derive their own paths, inflating
+  every kill set by tests the mutant never touched. The fix for a false KILLED
+  reintroduced one, in the recipe written to prevent it.
+
+  The differential harness honours `REVIEW_LOOP_SETUP_LIB` too — it did not at
+  first, so every mutant "passed" it without ever being run through it. A gate
+  that cannot see the mutant reports a measurement of nothing as a result.
+
   Check **which** test fails, by name. A mutant killed by 30 tests but not by the
   one written for it means that test is not doing its job. Aim for disjoint kill
   sets: one mutant, one test.
@@ -146,7 +170,7 @@ case for each before believing the fix is done.
   the activation notice plus five ways setup reported success over a dead install.
   It has **no GitHub release page yet**; the tag is on the remote and that is what
   `setup`'s update check reads, so the release page is presentation, not delivery.
-- **189 tests green** (99 hook, 72 setup, 9 shim, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
+- **232 tests green** (99 hook, 83 setup, 28 differential, 9 shim, 4 wrapper, 9 release), and the suite no longer leaks state files into `/tmp` (382 had accumulated; a central `afterEach` sweep now covers the failing path too). Mutation-tested here: 19 guards before this slice, plus the
   turn comparison, its plan condition, the dispatch and the baseline lifecycle.
   One survivor is kept deliberately and says so in a comment (`[ -n "$TURN_KEY" ]`
   cannot change the outcome, but the state it guards resolves to silence); two
@@ -254,7 +278,7 @@ cleared through three PLAN-review rounds but PARKED.
 ## Quick reference
 
 ```bash
-npm test                    # 189 tests, ~31s, no network, no ports
+npm test                    # typecheck + 232 tests, ~50s, no network, no ports
 bash -n hooks/review-loop.sh && ./hooks/review-loop.sh < payload.json
 ```
 
