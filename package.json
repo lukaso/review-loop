@@ -1,6 +1,6 @@
 {
   "name": "review-loop",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "A Claude Code Stop hook that keeps the fix-review-fix loop running until findings are resolved.",
   "license": "MIT",
   "type": "module",

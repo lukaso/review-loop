@@ -4,7 +4,7 @@ Shape borrowed from gstack: a bolded headline sentence, then what actually
 happened, then the numbers that back it. Every claim here is a measurement — if a
 number cannot be reproduced it is deleted rather than repeated.
 
-## [Unreleased] — `setup` ported to Node
+## [0.3.0] - 2026-08-24 — `setup` ported to Node
 
 **All five bar-clearing defects in v0.2.2 were `setup`'s path handling.** Measured
 across that release: `setup` took +356/-20 lines and every one of the five; the
