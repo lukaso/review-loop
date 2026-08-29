@@ -4,6 +4,21 @@ Shape borrowed from gstack: a bolded headline sentence, then what actually
 happened, then the numbers that back it. Every claim here is a measurement — if a
 number cannot be reproduced it is deleted rather than repeated.
 
+## [0.4.0] - 2026-08-29 — the message tells the fixer HOW, and says only what is true
+
+**Every defect in a counted fix-review-fix session came from a fix whose test was written after
+the code — born green, never once seen red.** The Stop moment is the fix-a-finding moment, so the
+message's "Just completed a review?" part now says it at the moment it applies: write the fix's
+failing test first, watch it fail. One rewritten line; the <13-line cap held (worst case still 12);
+the line is mutation-proven (reverting it fails its test).
+
+The message also stopped saying things that were not true: the single "code OR a plan" line split
+into a code line and a plan line, each asserted only when its condition holds (the code line needs
+a dirty tree AND a moved key — a plan-only turn no longer re-asserts an already-reviewed diff).
+The /plan-eng-review pointer became the built-in /code-review (measured 2026-08-24: most readers
+do not have the gstack skill). 236 tests; the fleet-facing baseline this targets, measured across
+three live liveapp instances the same day: mean 3.02 reviews per PR, p90=6, single PRs at 15 and 22.
+
 ## [0.3.0] - 2026-08-24 — `setup` ported to Node
 
 **All five bar-clearing defects in v0.2.2 were `setup`'s path handling.** Measured
