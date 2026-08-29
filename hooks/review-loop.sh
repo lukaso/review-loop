@@ -532,6 +532,12 @@ if [ -f "$STATE_FILE" ] && [ -n "$TURN_KEY" ] && [ "$STATE" = "$TURN_KEY" ] && [
   exit 0
 fi
 
+# THE EMIT'S COMPLETENESS DEPENDS ON THIS LINE, and the coupling is invisible from
+# there. The message is assembled from two conditional parts; if PLANS_CHANGED is
+# empty then this guard has already established TOTAL>0, and the guard below
+# establishes STATE != STORED, so CODE_CHANGED is set and the message cannot be
+# empty. Do NOT add a defensive "else" at the emit — it would be an uncoverable
+# guard, and this repo deletes those.
 [ "$TOTAL" -gt 0 ] || [ -n "$PLANS_CHANGED" ] || { consume_turn; exit 0; }
 
 # ── Ask once per distinct state ───────────────────────────────────────────────
@@ -541,23 +547,58 @@ fi
 # session, ever: stop 1 differs from an absent file and asks, stops 2..n compare
 # equal and exit. The single-plan-change test passes against that bug; only a
 # SECOND change catches it.
-if [ "$STATE" = "$(cat "$STATE_FILE" 2>/dev/null || echo "")" ] && [ -z "$PLANS_CHANGED" ]; then
+# ONE READER for $STATE_FILE, per the collect_state doctrine two hundred lines up:
+# "ONE copy, called twice. Two copies would drift." The value is needed twice — for
+# this guard and for CODE_CHANGED below — so it is read once.
+STORED=$(cat "$STATE_FILE" 2>/dev/null || echo "")
+if [ "$STATE" = "$STORED" ] && [ -z "$PLANS_CHANGED" ]; then
   consume_turn
   exit 0
 fi
 
-jq -cn '{
+# ── Say only what is true ────────────────────────────────────────────────────
+# $TOTAL is a LEVEL, not a delta: non-zero while the tree is dirty for ANY reason,
+# including code this session already asked about and that has not moved since.
+# Gating the code line on $TOTAL alone would re-assert "Code has changed since the
+# last review" on every subsequent plan-only turn, about a diff already reviewed.
+# The old single message said "code OR a plan" — vague, but HONEST. Splitting it
+# without this conjunct would have turned honest ambiguity into a false claim.
+#
+# Both conjuncts are load-bearing. `STATE != STORED` alone would emit the code line
+# after a commit (TOTAL=0, key moved to cksum("")) on any turn that also had a plan
+# change — and a naive "commit then fire" test cannot catch that, because with no
+# plan change the guard above exits first and nothing is emitted at all.
+CODE_CHANGED=
+[ "$TOTAL" -gt 0 ] && [ "$STATE" != "$STORED" ] && CODE_CHANGED=1
+
+# ASSEMBLY RULES, and the cap has zero spare so both matter:
+#   - no trailing newline
+#   - a separator belongs to the part that FOLLOWS it, never the one before
+# A per-part "$part\n\n" leaves a dangling blank whenever a part is omitted.
+MSG="Wait for inflight actions to complete before doing anything."
+[ -n "$CODE_CHANGED" ] && MSG="$MSG
+
+Code has changed since the last review — run /code-review on the diff."
+# NAMES A PROCEDURE, NOT A PRODUCT. This used to say "/plan-eng-review on the
+# plan" — a gstack skill, not a Claude Code built-in (measured 2026-08-24), so most
+# readers were told to run a command they do not have. /code-review above IS a
+# built-in and stays.
+[ -n "$PLANS_CHANGED" ] && MSG="$MSG
+
+A plan has changed — have it reviewed adversarially, by a reviewer that is
+not you, before any code is written."
+MSG="$MSG
+
+Just completed a review? Fix or reject its findings. If there are fixes,
+review again.
+
+Consider skipping/rejecting: LOW priority; MEDIUM priority if the fix costs
+more than the problem."
+
+jq -cn --arg msg "$MSG" '{
   hookSpecificOutput: {
     hookEventName: "Stop",
-    additionalContext: (
-      "Wait for inflight actions to complete before doing anything.\n\n" +
-      "Unreviewed changes in the tree? Run /code-review on the diff, or\n" +
-      "/plan-eng-review on the plan.\n\n" +
-      "Just completed a review? Fix or reject its findings. If there are fixes,\n" +
-      "review again.\n\n" +
-      "Consider skipping/rejecting: LOW priority; MEDIUM priority if the fix costs\n" +
-      "more than the problem."
-    )
+    additionalContext: $msg
   }
 }' && { printf '%s' "$STATE" > "$STATE_FILE"; : > "$BASELINE_FILE"; consume_turn; } 2>/dev/null
 # Recorded only after the message is on stdout, so a FAILED STATE WRITE retries

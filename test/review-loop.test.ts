@@ -530,7 +530,14 @@ describe("message", () => {
     // written code or a plan?", which additionally asserted that YOU wrote it; in
     // a shared checkout that is false, so the claim is gone and the choice stays.
     expect(msg).toContain("/code-review on the diff");
-    expect(msg).toContain("/plan-eng-review on the plan");
+    // THE PLAN LINE IS ABSENT HERE. This fixture seeds only a code edit, so
+    // PLANS_CHANGED is empty. It used to assert "/plan-eng-review on the plan" on
+    // this same message — an "or" the reader had to resolve, on a turn where the
+    // hook already knew the answer.
+    expect(msg, "no plan changed, so no plan line").not.toContain("A plan has changed");
+    // /plan-eng-review is a gstack skill, not a Claude Code built-in — measured
+    // 2026-08-24. Naming it told most readers to run a command they do not have.
+    expect(msg, "must not name a command most readers lack").not.toContain("/plan-eng-review");
     // A fix is code nobody has reviewed, so fixes — not findings — are what make
     // another round due. Every round of this change's own review found a bug
     // introduced while fixing the previous round.
@@ -549,11 +556,18 @@ describe("message", () => {
     // The message accreted a clause per review round until it was 25 lines, which
     // is how a nudge becomes wallpaper. It is the entire product surface; length
     // is a feature of it, not a detail.
+    // BOTH PARTS ARMED — the worst case. Both cap tests used a code-only fixture,
+    // which after the split measures the shape that got SHORTER while the longest
+    // one goes uncapped: a correct rule applied at the wrong site.
     edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    seedBaseline(BASE);
+    plan("p.md", "v2", BASE + 100);
     const msg = fire()!;
-    // The message is 10 lines. A bound of 20 would let it nearly double before
-    // firing, which is not a guard against the accretion it exists to catch —
-    // it grew a clause per review round to reach 25 lines once already.
+    // MEASURED: code-only 9, plan-only 10, both 12. A bound of 20 would let it
+    // nearly double before firing, which is no guard against the accretion it
+    // exists to catch — it reached 25 lines once already.
+    // 12 against 13 is ZERO SPARE, and that is the point: the next accreted clause
+    // fails immediately. Do not raise the bound to buy room.
     expect(msg.split("\n").length, "message should stay compact").toBeLessThan(13);
   });
 
@@ -774,7 +788,71 @@ describe("plans — the phase git cannot see", () => {
     // Correct in production; in a test with pinned epochs it must be re-pinned.
     stampState("sess-1", BASE);
     plan("p.md", "v2", BASE + 100);
-    expect(fire(), "a changed plan must ask").toContain("/plan-eng-review");
+    const askMsg = fire();
+    expect(askMsg, "a changed plan must ask").toContain("A plan has changed");
+    // SOLE KILLER for the `TOTAL > 0` conjunct. The tree is CLEAN here, so the code
+    // line must be absent — without that conjunct the message would say "Code has
+    // changed since the last review" about a tree with nothing in it.
+    expect(askMsg, "clean tree: no code line").not.toContain("/code-review");
+  });
+
+  it("does not claim code changed on the turn after a commit", () => {
+    // THE SOLE KILLER for the `TOTAL > 0` conjunct, and the clean-tree fixture above
+    // is NOT it: there STATE already equals STORED, so the conjunct is redundant and
+    // dropping it changes nothing. The distinguishing case needs TOTAL=0 while
+    // STATE != STORED — which is exactly the turn after a commit: the stored key is
+    // the old DIRTY one, the live key is cksum(""). Without `TOTAL > 0` the message
+    // would announce "Code has changed since the last review" about a tree with
+    // nothing in it.
+    seedBaseline(BASE);
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    expect(fire(), "dirty tree asks, and stores the dirty key").toContain("Code has changed");
+    commitAll();
+
+    // A plan change is what carries us past the guards to the emit at all — with a
+    // clean tree and no plan change the hook exits before saying anything, which is
+    // why the naive "commit then fire" version of this test passes against every
+    // mutation while asserting nothing.
+    stampState("sess-1", BASE);
+    plan("p.md", "v2", BASE + 100);
+    const after = fire();
+    expect(after, "the plan still asks").toContain("A plan has changed");
+    expect(after, "but the tree is clean — do not announce code").not.toContain("Code has changed");
+  });
+
+  it("does not re-assert the code line when only a plan moved", () => {
+    // SOLE KILLER for the `STATE != STORED` conjunct, and the fixture the suite did
+    // not have. $TOTAL is a LEVEL — non-zero while the tree is dirty for ANY reason,
+    // including code this session already asked about. So gating the code line on
+    // $TOTAL alone would re-assert "Code has changed since the last review" on every
+    // subsequent plan turn, about a diff that was reviewed and has not moved.
+    // Today's vague "or" was honest ambiguity; the split would have made it a lie.
+    // ORDER MATTERS: seedBaseline() fires the hook itself, to make it write a real
+    // cksum rather than a hand-written one. Dirtying the tree BEFORE it means that
+    // ask is already consumed and turn 1 below is silent — the test then passes for
+    // the wrong reason, or fails confusingly. Dirty it AFTER.
+    seedBaseline(BASE);
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    expect(fire(), "turn 1: dirty tree must ask").toContain("Code has changed");
+
+    // Turn 2: the plan moves, the tree does NOT.
+    stampState("sess-1", BASE);
+    plan("p.md", "v2", BASE + 100);
+    const msg = fire();
+    expect(msg, "a changed plan must still ask").toContain("A plan has changed");
+    expect(msg, "the code has not moved since the last ask — do not re-assert it")
+      .not.toContain("Code has changed");
+  });
+
+  it("says BOTH when code and a plan both moved", () => {
+    // The worst case, and the one the cap now measures. Each part carries its own
+    // claim, so both are true simultaneously and neither has to be hedged.
+    seedBaseline(BASE);
+    edit("packages/x/src/committed.ts", "export const a = 3;\n");
+    plan("p.md", "v2", BASE + 100);
+    const msg = fire();
+    expect(msg, "code moved").toContain("Code has changed since the last review");
+    expect(msg, "and so did a plan").toContain("A plan has changed");
   });
 
   it("re-arms on a SECOND plan change — the git-only key guard", () => {
@@ -1954,7 +2032,12 @@ describe("the message", () => {
     edit("packages/x/src/committed.ts", "export const a = 2;\n");
     const msg = fire()!;
     expect(msg, "false authorship claim").not.toContain("Just written");
-    expect(msg).toContain("Unreviewed changes in the tree?");
+    // THE HEADER IS DELETED. "Unreviewed changes in the tree?" was unconditional
+    // while the code LINE became conditional, so a plan-only turn on a clean tree
+    // still asserted it — a question with nothing under it. Each part is now a
+    // complete sentence carrying its own claim.
+    expect(msg, "the header must not have survived").not.toContain("Unreviewed changes in the tree?");
+    expect(msg).toContain("Code has changed since the last review");
     expect(msg.split("\n").length, "the line cap still stands").toBeLessThan(13);
   });
 });
