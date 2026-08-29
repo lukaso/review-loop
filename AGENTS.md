@@ -44,6 +44,14 @@ reasoning behind everything deferred.
   prose-only round triggered a full re-review, which found more prose. The genuine
   defects had all surfaced by round 7.
 - **A plan whose body changed after its review is an unreviewed plan.**
+- **The fix is TDD too — this is the half that gets dropped.** Every defect a second
+  round found here came from a fix whose test was written after the code, so it was
+  born green and never once seen red. Write the assertion, watch it fail, then change
+  the code. One-liners are the worst case, not the exception.
+- **Ask the reviewer what a correct fix must ASSERT, not only what is broken.** Handed
+  a bare defect, the fixer invents the acceptance criteria, and that is the weakest
+  step in the loop. "This needs an assertion that the destination is never unlinked"
+  is a round-two review round that never has to happen.
 
 ### Committing
 - **Never commit or push without explicit user approval.** Report what to test
@@ -130,6 +138,12 @@ detail. Do not inline rules into it.
   Check **which** test fails, by name. A mutant killed by 30 tests but not by the
   one written for it means that test is not doing its job. Aim for disjoint kill
   sets: one mutant, one test.
+- **A UNIFORM result is a broken harness, not a measurement.** All BLOCKED, all
+  passed, all identical — throw it away and repair the harness. Read once as data it
+  reported a conclusion backwards. Every injection needs a control cell that must come
+  out the other way, and the injection itself is validated against the UNFIXED code:
+  if the unfixed code passes your failure test, the failure model is wrong, not the
+  code.
 - **A DOMINATED assertion is as dead as an uncoverable guard.** Two refusal paths
   asserted in one `it` looked like two tests and were one: every ordering mutant
   that reached the second tripped the first and died there, so the second could

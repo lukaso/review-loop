@@ -589,8 +589,8 @@ A plan has changed — have it reviewed adversarially, by a reviewer that is
 not you, before any code is written."
 MSG="$MSG
 
-Just completed a review? Fix or reject its findings. If there are fixes,
-review again.
+Just completed a review? Fix or reject each finding — write the fix's failing
+test first, watch it fail. If there are fixes, review again.
 
 Consider skipping/rejecting: LOW priority; MEDIUM priority if the fix costs
 more than the problem."

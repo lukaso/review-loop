@@ -571,6 +571,18 @@ describe("message", () => {
     expect(msg.split("\n").length, "message should stay compact").toBeLessThan(13);
   });
 
+  it("tells the fixer HOW at the moment it applies: failing test first, seen red", () => {
+    // PLAN-review-fix-discipline (liveapp, 2026-08-29): a counted session's defects all came
+    // from fixes whose tests were written AFTER the code — born green, never once seen red —
+    // and the Stop moment is exactly the fix-a-finding moment. So the one rule that kills the
+    // class rides the existing "Just completed a review?" part, within the cap above; the rest
+    // of the workflow stays in AGENTS.md (a pointer arrives on time, rules do not accrete here).
+    edit("packages/x/src/committed.ts", "export const a = 2;\n");
+    const msg = fire()!;
+    expect(msg).toContain("failing");
+    expect(msg, "red before green is the load-bearing half").toContain("watch it fail");
+  });
+
 });
 
 describe("scale", () => {
